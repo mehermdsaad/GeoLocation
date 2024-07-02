@@ -1,4 +1,6 @@
 import binascii
+import csv
+import json
 import os
 import re
 import shutil
@@ -21,29 +23,28 @@ from selenium.webdriver.support.ui import WebDriverWait
 #######
 # TASK LISTS
 
-# - Get total reviews automatically - NOTE: DONE
 # - To Load everything one after the other without quitting the browser - Second thoughts, might not be very practical.. might save whatever we can procure in a csv.
-# - Explore the API, Find Names, Locations
 # - Function that loads listing image
-# - PLEAAAASE MAKE IT MORE READABLE FOR YOUR FUTURE SELF'S SAKE - NOTE: DONE
-# - TRY GIT FOR BETTER SYNCHRONIZATION
+
+log_file = "./logs/scraping_log.json"
 
 
 class GoogleSpider(scrapy.Spider):
 
     name = "google"
-    next_page_token = None
-
-    # Log file path
-    log_file = "scraping_log.json"
 
     HEADERS = {
         "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36 Edg/87.0.664.66",
         "referer": None,
     }
 
+    def __init__(self, *args, **kwargs):
+        super(GoogleSpider, self).__init__(*args, **kwargs)
+        self.progress_file = log_file
+        self.progress = self.load_progress()
+
     def get_review_page_fid(self, name):
-        """Searches for the restaurant name and returns the link of the reviews page
+        """Searches for the restaurant name, one at a time and returns the feature_id, gps_coordinates of the reviews page NOTE: Uses selenium!
         Returns
         ------
         fid, gps_coordinate : feature_id of the reviews page, gps_coordinate: a str of format "lat,lon"
@@ -89,44 +90,132 @@ class GoogleSpider(scrapy.Spider):
 
         return fid, gps_coordinate
 
-    def start_requests(self):
-        restaurant_names = [
-            # # RESTAURANT NAMES, SHOULD GET IT FROM GOOGLE MAPS API
-            # "Torch Club",
-            "B Laban Abu Dhabi",
-            # "Sushi Counter NYUAD",
-        ]
-
-        gps_coordinates = []
+    def get_fid_gps_from_names(self, restaurant_names):
+        """Helper method to get feature_ids and gps_coordinates from restaurant_names. Takes a list of restaurant names.
+        Returns the lists feature_id,gps_coordinates
+        -- NOTE: This makes use of Selenium, so captcha might be an issue
+        -- NOTE: Might need to implement a losg system for getting the fid,gps since captcha and other stuff might be a hurdle
+        """
         feature_ids = []
+        gps_coordinates = []
         for restaurant_name in restaurant_names:
             fid, gps_coordinate = self.get_review_page_fid(restaurant_name)
             feature_ids.append(fid)
             gps_coordinates.append(gps_coordinate)
 
-        it = 0
-        for restaurant_name, feature_id, gps_coordinate in zip(
-            restaurant_names, feature_ids, gps_coordinates
-        ):
-            it += 1
-            # FOR EACH RESTAURANT (Feature Id), FIND THE LINK TO THE REVIEWS PAGE
-            url = (
-                "https://www.google.com/async/reviewDialog?async=feature_id:"
-                + str(feature_id)
-                + ",_fmt:pc"
-            )
+        return feature_ids, gps_coordinates
 
-            yield Request(
-                url=url,
-                headers=self.HEADERS,
-                callback=self.parse_reviews,
-                meta={
-                    "iter": 0,
-                    "restaurant_name": restaurant_name,
-                    "gps_coordinate": gps_coordinate,
-                    "total_pages_to_load": 1,  # DUMMY VALUE, IT UPDATES AUTOMATICALLY IN THE FIRST CALLBACK
-                },
-            )
+    def save_restaurant_details(self):
+        """This is a method designed to be used only to get a comprehensive list of names and their details once."""
+        # NOTE: CALL THE NAME SCRAPING FUNCTION HERE
+        restaurant_names = [
+            # # RESTAURANT NAMES, SHOULD GET IT FROM GOOGLE MAPS API
+            "B Laban Abu Dhabi",
+            "Sushi Counter NYUAD",
+            "Happy Yemen Restaurant",
+            "Bait El Khetyar -Najdah",
+        ]
+
+        feature_ids, gps_coordinates = self.get_fid_gps_from_names(restaurant_names)
+
+        # SAVE INDEX,NAME,FID,GPS IN A CSV HERE PLS
+        # Save details to a CSV file
+        with open("./data/restaurant_details.csv", "w", newline="") as csvfile:
+            fieldnames = ["Index", "Restaurant Name", "Feature ID", "GPS Coordinates"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+            for idx, (name, fid, gps) in enumerate(
+                zip(restaurant_names, feature_ids, gps_coordinates)
+            ):
+                writer.writerow(
+                    {
+                        "Index": idx,
+                        "Restaurant Name": name,
+                        "Feature ID": fid,
+                        "GPS Coordinates": gps,
+                    }
+                )
+
+    def load_restaurant_details(self):
+        """Load the restaurant details from the CSV file into a list."""
+        restaurant_details = []
+        with open("./data/restaurant_details.csv", "r") as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                restaurant_details.append(row)
+        return restaurant_details
+
+    def load_progress(self):
+        if os.path.getsize(self.progress_file) == 0:
+            return {}
+        try:
+            with open(self.progress_file, "r") as file:
+                return json.load(file)
+        except FileNotFoundError:
+            return {}
+
+    def save_progress(self):
+        with open(self.progress_file, "w") as file:
+            json.dump(self.progress, file)
+
+    def start_requests(self):
+
+        restaurant_details = self.load_restaurant_details()
+
+        for restaurant_index, restaurant in enumerate(restaurant_details):
+            if str(restaurant_index) not in self.progress:
+                self.progress[str(restaurant_index)] = {
+                    "status": "not_started",
+                    "next_page_token": "",
+                }
+
+            if self.progress[str(restaurant_index)]["status"] != "completed":
+
+                restaurant_name, feature_id, gps_coordinate = (
+                    restaurant["Restaurant Name"],
+                    restaurant["Feature ID"],
+                    restaurant["GPS Coordinates"],
+                )
+                next_page_token = self.progress[str(restaurant_index)][
+                    "next_page_token"
+                ]
+                url = (
+                    "https://www.google.com/async/reviewDialog?async=feature_id:"
+                    + str(feature_id)
+                    + f",next_page_token:{next_page_token}"
+                    + ",_fmt:pc"
+                )
+
+                yield Request(
+                    url=url,  # THE URL CONTAINS THE NEXT PAGE TOKEN, NO NEED TO SEND IT VIA META
+                    headers=self.HEADERS,
+                    callback=self.parse_reviews,
+                    meta={
+                        "restaurant_index": restaurant_index,
+                        "restaurant_name": restaurant_name,
+                        "feature_id": feature_id,
+                        "gps_coordinate": gps_coordinate,
+                    },
+                )
+
+    def save_to_csv(self, row):
+        file_exists = os.path.isfile("reviews.csv")
+        with open("reviews.csv", "a", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "Restaurant Name",
+                "GPS Coordinates",
+                "Reviewer",
+                "Description",
+                "Rating",
+                "Review Date",
+                "Image Filename",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
 
     def generate_unique_filename(self):
         """Helper Method to generate unique filenames
@@ -156,144 +245,137 @@ class GoogleSpider(scrapy.Spider):
 
         """
 
-        iter = response.meta["iter"]
-        total_pages_to_load = response.meta["total_pages_to_load"]
-        if iter == 0:
-            total_reviews_text = response.css("span.z5jxId::text").extract_first()
-            if total_reviews_text:
-                # Filter out non-digit characters and convert to integer
-                total_reviews = int(re.sub(r"[^\d]", "", total_reviews_text))
-
-            total_pages_to_load = total_reviews / 10  # since
-
-            if total_pages_to_load > int(total_pages_to_load):
-                total_pages_to_load += 1
-
-            """AS OF NOW WE LIMIT THE TOTAL PAGES TO SCRAPE"""
-            total_pages_to_load = 1
-
+        restaurant_index = response.meta["restaurant_index"]
         restaurant_name = response.meta["restaurant_name"]
         gps_coordinate = response.meta["gps_coordinate"]
+        feature_id = response.meta["feature_id"]
 
-        ##########################
-        # LOG YOUR CURRENT STATE SO THAT YOU CAN PICK UP FROM HERE LATER
+        all_reviews = response.xpath('//*[@id="reviewSort"]/div/div[2]/div')
 
-        if iter < total_pages_to_load:
-            iter += 1
+        # WRITE CSV OF 10 REVIEWS
+        review_i = 0
+        for review in all_reviews:
+            # REVIEWER NAME
+            reviewer = review.css("div.TSUbDb a::text").extract_first()
 
-            all_reviews = response.xpath('//*[@id="reviewSort"]/div/div[2]/div')
-
-            # WRITE CSV OF 10 REVIEWS
-            for review in all_reviews:
-
-                # REVIEWER NAME
-                reviewer = review.css("div.TSUbDb a::text").extract_first()
-
-                # GET THE DESCRIPTION
-                description = review.xpath(
-                    './/span[@class="review-full-text"]'
-                ).extract_first()
-
-                if description is None:
-                    # THIS IS WHEN THERE IS NO ...MORE OPTION AFTER THE DESCRIPTION
-                    description = review.css(".Jtu6Td span").extract_first()
-
-                    soupDescription = BeautifulSoup(description, "html.parser")
-
-                    if soupDescription:
-                        # THERE MIGHT BE OTHRE DIVS/ELEMENTS WHICH WE ARE NOT INTERESTED IN. WE ONLY CARE ABOUT THE DESCRIPTION TEXT
-                        nested_div = soupDescription.find(
-                            "div", class_="k8MTF"
-                        )  # NO UNWANTED DIVS
-                        if nested_div:
-                            nested_div.decompose()
-
-                        nested_span = soupDescription.find(  # NO UNWANTED SPANS
-                            "span", attrs={"data-ellipsis-for-sq": True}
-                        )
-                        if nested_span:
-                            nested_span.decompose()
-
-                        nested_a = soupDescription.find(  # NO UNWANTED LINK TAGS
-                            "a", class_="review-more-link"
-                        )
-                        if nested_a:
-                            nested_a.decompose()
-
-                        for br in soupDescription.find_all("br"):
-                            br.replace_with("\n")  # CHANGE <br> TAGS TO "\n"
-
-                    description = soupDescription.get_text(separator="")
-
-                    if description is None:  # JUST IN CASE
-                        description = ""
-                else:
-                    soup = BeautifulSoup(description, "html.parser")
-                    description = soup.get_text(
-                        separator="\n"
-                    )  # CHANGE <br> TAGS TO "\n"
-
-                # GET REVIEW RATING
-                # NOTE: ACTIVATE NYU VPN PLEASE, THE ARABIC LOCATION ISN'T HELPFUL FOR SCRAPING
-                review_rating = float(
-                    review.xpath('.//span[@class="lTi8oc z3HNkc"]/@aria-label')
-                    .extract_first()
-                    .split(" ")[1]
-                )
-
-                # GET REVIEW DATE
-                review_date = review.xpath(
-                    './/span[@class="dehysf lTi8oc"]/text()'
-                ).extract_first()
-
-                # IMAGE LINKS HERE WE GO!
-                review_imgs_div = review.xpath(
-                    './/div[@class="EDblX GpHuwc"]/div/a/div'
-                )
-
-                # WE GET THE IMAGE URL BY EXTRACTING FROM background-image:url()
-                url_pattern = re.compile(r"url\((.*?)\)")
-
-                image_i = 0
-                names_str = ""
-                for review_img_div in review_imgs_div:
-                    image_i += 1
-                    style_str = review_img_div.xpath("@style").extract_first()
-
-                    # FIND THE URL
-                    url = url_pattern.search(style_str).group(1)
-                    url = re.sub(r"=w100-h100-p-n-k-no", "", url)
-                    url += "=s2000-p-k-no"  # THIS MAKES THE IMAGE 2000x2000
-
-                    name = self.generate_unique_filename()
-                    names_str += "," + name
-
-                    """DOWNLOAD"""
-                    # self.download_image(name, url)
-                names_str = names_str[1:]  # DROP THE COMMA
-
-                if image_i > 0:
-                    # A SEPERATE LINE FOR EACH REVIEWER
-                    yield {
-                        "RESTAURANT_NAME": restaurant_name,
-                        "GPS": gps_coordinate,
-                        "REVIEWER": reviewer,
-                        "DESCRIPTION": description,
-                        "rating": review_rating,
-                        "review_date": review_date,
-                        "IMAGE URL": names_str,
-                    }
-
-            # FIND NEXT PAGE TOKEN
-            next_page_token_div = response.xpath('//*[@id="reviewSort"]/div/div[2]')
-            next_page_token = next_page_token_div.xpath(
-                "@data-next-page-token"
+            # GET THE DESCRIPTION
+            description = review.xpath(
+                './/span[@class="review-full-text"]'
             ).extract_first()
 
-            next_url = (
-                response.request.url.split("next_page_token:")[0]
-                + f",next_page_token:{next_page_token}"
+            if description is None:
+                # THIS IS WHEN THERE IS NO ...MORE OPTION AFTER THE DESCRIPTION
+                description = review.css(".Jtu6Td span").extract_first()
+
+                soupDescription = BeautifulSoup(description, "html.parser")
+
+                if soupDescription:
+                    # THERE MIGHT BE OTHRE DIVS/ELEMENTS WHICH WE ARE NOT INTERESTED IN. WE ONLY CARE ABOUT THE DESCRIPTION TEXT
+                    nested_div = soupDescription.find(
+                        "div", class_="k8MTF"
+                    )  # NO UNWANTED DIVS
+                    if nested_div:
+                        nested_div.decompose()
+
+                    nested_span = soupDescription.find(  # NO UNWANTED SPANS
+                        "span", attrs={"data-ellipsis-for-sq": True}
+                    )
+                    if nested_span:
+                        nested_span.decompose()
+
+                    nested_a = soupDescription.find(  # NO UNWANTED LINK TAGS
+                        "a", class_="review-more-link"
+                    )
+                    if nested_a:
+                        nested_a.decompose()
+
+                    for br in soupDescription.find_all("br"):
+                        br.replace_with("\n")  # CHANGE <br> TAGS TO "\n"
+
+                description = soupDescription.get_text(separator="")
+
+                if description is None:  # JUST IN CASE
+                    description = ""
+            else:
+                soup = BeautifulSoup(description, "html.parser")
+                description = soup.get_text(separator="\n")  # CHANGE <br> TAGS TO "\n"
+
+            # GET REVIEW RATING
+            # NOTE: ACTIVATE NYU VPN PLEASE, THE ARABIC LOCATION ISN'T HELPFUL FOR SCRAPING
+            review_rating = float(
+                review.xpath('.//span[@class="lTi8oc z3HNkc"]/@aria-label')
+                .extract_first()
+                .split(" ")[1]
             )
+
+            # GET REVIEW DATE
+            review_date = review.xpath(
+                './/span[@class="dehysf lTi8oc"]/text()'
+            ).extract_first()
+
+            # IMAGE LINKS HERE WE GO!
+            review_imgs_div = review.xpath('.//div[@class="EDblX GpHuwc"]/div/a/div')
+
+            # WE GET THE IMAGE URL BY EXTRACTING FROM background-image:url()
+            url_pattern = re.compile(r"url\((.*?)\)")
+
+            image_i = 0
+            image_names_str = ""
+            for review_img_div in review_imgs_div:
+                image_i += 1
+                style_str = review_img_div.xpath("@style").extract_first()
+
+                # FIND THE URL
+                url = url_pattern.search(style_str).group(1)
+                url = re.sub(r"=w100-h100-p-n-k-no", "", url)
+                url += "=s2000-p-k-no"  # THIS MAKES THE IMAGE 2000x2000
+
+                image_name = self.generate_unique_filename()
+                image_names_str += "," + image_name
+
+                """DOWNLOAD"""
+                # self.download_image(image_name, url)
+            image_names_str = image_names_str[1:]  # DROP THE COMMA
+
+            if image_i > 0:
+                # A SEPERATE LINE FOR EACH REVIEWER
+
+                data_row = {
+                    "Restaurant Name": restaurant_name,
+                    "GPS Coordinates": gps_coordinate,
+                    "Reviewer": reviewer,
+                    "Description": description,
+                    "Rating": review_rating,
+                    "Review Date": review_date,
+                    "Image Filename": image_names_str,
+                }
+                self.save_to_csv(data_row)
+
+            review_i += 1
+
+        # FIND NEXT PAGE TOKEN
+        next_page_token_div = response.xpath('//*[@id="reviewSort"]/div/div[2]')
+        next_page_token = next_page_token_div.xpath(
+            "@data-next-page-token"
+        ).extract_first()
+
+        next_url = (
+            response.request.url.split(",next_page_token:")[0]
+            + f",next_page_token:{next_page_token},_fmt:pc"
+        )
+        print("NEXT URL!\n\n\n", next_url, "NEXT URL!\n\n\n")
+
+        ##########################
+        # LOG YOUR CURRENT PROGRESS SO THAT YOU CAN PICK UP FROM HERE LATER
+        self.progress[str(restaurant_index)]["next_page_token"] = next_page_token
+        if next_page_token == "":
+            self.progress[str(restaurant_index)]["status"] = "completed"
+        else:
+            self.progress[str(restaurant_index)]["status"] = "in_progress"
+
+        self.save_progress()
+
+        if next_page_token != "":
             # SEND REQUEST TO LOAD THE NEXT 10 REVIEWS
             yield Request(
                 url=next_url,
@@ -301,9 +383,13 @@ class GoogleSpider(scrapy.Spider):
                 callback=self.parse_reviews,
                 dont_filter=True,
                 meta={
-                    "iter": iter,
+                    "restaurant_index": restaurant_index,
                     "restaurant_name": restaurant_name,
+                    "feature_id": feature_id,
                     "gps_coordinate": gps_coordinate,
-                    "total_pages_to_load": total_pages_to_load,
                 },
             )
+
+
+# spider = GoogleSpider()
+# spider.save_restaurant_details()
