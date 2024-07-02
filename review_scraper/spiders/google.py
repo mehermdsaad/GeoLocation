@@ -26,7 +26,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 # - To Load everything one after the other without quitting the browser - Second thoughts, might not be very practical.. might save whatever we can procure in a csv.
 # - Function that loads listing image
 
-log_file = "./logs/scraping_log.json"
+progress_file = "./logs/scraping_log.json"
+restaurant_details_file = "./data/restaurant_details.json"
 
 
 class GoogleSpider(scrapy.Spider):
@@ -40,8 +41,10 @@ class GoogleSpider(scrapy.Spider):
 
     def __init__(self, *args, **kwargs):
         super(GoogleSpider, self).__init__(*args, **kwargs)
-        self.progress_file = log_file
+        self.progress_file = progress_file
         self.progress = self.load_progress()
+        self.restaurant_details_file = restaurant_details_file
+        self.restaurant_details = self.load_progress_restaurant_details()
 
     def get_review_page_fid(self, name):
         """Searches for the restaurant name, one at a time and returns the feature_id, gps_coordinates of the reviews page NOTE: Uses selenium!
@@ -94,16 +97,33 @@ class GoogleSpider(scrapy.Spider):
         """Helper method to get feature_ids and gps_coordinates from restaurant_names. Takes a list of restaurant names.
         Returns the lists feature_id,gps_coordinates
         -- NOTE: This makes use of Selenium, so captcha might be an issue
-        -- NOTE: Might need to implement a losg system for getting the fid,gps since captcha and other stuff might be a hurdle
+        -- NOTE: Might need to implement a log system for getting the fid,gps since captcha and other stuff might be a hurdle
         """
-        feature_ids = []
-        gps_coordinates = []
-        for restaurant_name in restaurant_names:
-            fid, gps_coordinate = self.get_review_page_fid(restaurant_name)
-            feature_ids.append(fid)
-            gps_coordinates.append(gps_coordinate)
 
-        return feature_ids, gps_coordinates
+        # self.load_progress_restaurant_details()
+
+        for restaurant_name in restaurant_names:
+            if not self.restaurant_details.get(restaurant_name, {}).get(
+                "feature_id", None
+            ):
+                fid, gps_coordinate = self.get_review_page_fid(restaurant_name)
+                if fid:
+                    if self.restaurant_details.get(restaurant_name, None):
+                        self.restaurant_details[restaurant_name]["feature_id"] = fid
+                        self.restaurant_details[restaurant_name][
+                            "gps_coordinates"
+                        ] = gps_coordinate
+                    else:
+                        restaurant_detail = {
+                            "feature_id": fid,
+                            "gps_coordinates": gps_coordinate,
+                        }
+                        self.restaurant_details[restaurant_name] = restaurant_detail
+
+                elif self.restaurant_details.get(restaurant_name, None):
+                    del self.restaurant_details[restaurant_name]
+
+                self.save_progress_restaurant_details()
 
     def save_restaurant_details(self):
         """This is a method designed to be used only to get a comprehensive list of names and their details once."""
@@ -114,43 +134,26 @@ class GoogleSpider(scrapy.Spider):
             "Sushi Counter NYUAD",
             "Happy Yemen Restaurant",
             "Bait El Khetyar -Najdah",
+            "The Marketplace",
         ]
 
-        feature_ids, gps_coordinates = self.get_fid_gps_from_names(restaurant_names)
-
-        # SAVE INDEX,NAME,FID,GPS IN A CSV HERE PLS
-        # Save details to a CSV file
-        with open("./data/restaurant_details.csv", "w", newline="") as csvfile:
-            fieldnames = ["Index", "Restaurant Name", "Feature ID", "GPS Coordinates"]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-
-            writer.writeheader()
-            for idx, (name, fid, gps) in enumerate(
-                zip(restaurant_names, feature_ids, gps_coordinates)
-            ):
-                writer.writerow(
-                    {
-                        "Index": idx,
-                        "Restaurant Name": name,
-                        "Feature ID": fid,
-                        "GPS Coordinates": gps,
-                    }
-                )
-
-    def load_restaurant_details(self):
-        """Load the restaurant details from the CSV file into a list."""
-        restaurant_details = []
-        with open("./data/restaurant_details.csv", "r") as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                restaurant_details.append(row)
-        return restaurant_details
+        self.get_fid_gps_from_names(restaurant_names)
 
     def load_progress(self):
-        if os.path.getsize(self.progress_file) == 0:
-            return {}
         try:
+            if os.path.getsize(self.progress_file) == 0:
+                return {}
             with open(self.progress_file, "r") as file:
+                return json.load(file)
+        except FileNotFoundError:
+            return {}
+
+    def load_progress_restaurant_details(self):
+        try:
+            if os.path.getsize(self.restaurant_details_file) == 0:
+                return {}
+            with open(self.restaurant_details_file, "r") as file:
+                print("\n\n\nFILE LOADED!!!!!!!!!!!!!!!!!!!!!!!!\n\n\n\n")
                 return json.load(file)
         except FileNotFoundError:
             return {}
@@ -159,27 +162,29 @@ class GoogleSpider(scrapy.Spider):
         with open(self.progress_file, "w") as file:
             json.dump(self.progress, file)
 
+    def save_progress_restaurant_details(self):
+        with open(self.restaurant_details_file, "w") as file:
+            json.dump(self.restaurant_details, file)
+
     def start_requests(self):
 
-        restaurant_details = self.load_restaurant_details()
+        # self.load_restaurant_details()
 
-        for restaurant_index, restaurant in enumerate(restaurant_details):
-            if str(restaurant_index) not in self.progress:
-                self.progress[str(restaurant_index)] = {
+        for restaurant_name in self.restaurant_details:
+            restaurant_detail = self.restaurant_details[restaurant_name]
+            if restaurant_name not in self.progress:
+                self.progress[restaurant_name] = {
                     "status": "not_started",
                     "next_page_token": "",
                 }
 
-            if self.progress[str(restaurant_index)]["status"] != "completed":
+            if self.progress[restaurant_name]["status"] != "completed":
 
-                restaurant_name, feature_id, gps_coordinate = (
-                    restaurant["Restaurant Name"],
-                    restaurant["Feature ID"],
-                    restaurant["GPS Coordinates"],
+                feature_id, gps_coordinate = (
+                    restaurant_detail["feature_id"],
+                    restaurant_detail["gps_coordinates"],
                 )
-                next_page_token = self.progress[str(restaurant_index)][
-                    "next_page_token"
-                ]
+                next_page_token = self.progress[restaurant_name]["next_page_token"]
                 url = (
                     "https://www.google.com/async/reviewDialog?async=feature_id:"
                     + str(feature_id)
@@ -192,7 +197,6 @@ class GoogleSpider(scrapy.Spider):
                     headers=self.HEADERS,
                     callback=self.parse_reviews,
                     meta={
-                        "restaurant_index": restaurant_index,
                         "restaurant_name": restaurant_name,
                         "feature_id": feature_id,
                         "gps_coordinate": gps_coordinate,
@@ -245,7 +249,6 @@ class GoogleSpider(scrapy.Spider):
 
         """
 
-        restaurant_index = response.meta["restaurant_index"]
         restaurant_name = response.meta["restaurant_name"]
         gps_coordinate = response.meta["gps_coordinate"]
         feature_id = response.meta["feature_id"]
@@ -367,11 +370,11 @@ class GoogleSpider(scrapy.Spider):
 
         ##########################
         # LOG YOUR CURRENT PROGRESS SO THAT YOU CAN PICK UP FROM HERE LATER
-        self.progress[str(restaurant_index)]["next_page_token"] = next_page_token
+        self.progress[restaurant_name]["next_page_token"] = next_page_token
         if next_page_token == "":
-            self.progress[str(restaurant_index)]["status"] = "completed"
+            self.progress[restaurant_name]["status"] = "completed"
         else:
-            self.progress[str(restaurant_index)]["status"] = "in_progress"
+            self.progress[restaurant_name]["status"] = "in_progress"
 
         self.save_progress()
 
@@ -383,7 +386,6 @@ class GoogleSpider(scrapy.Spider):
                 callback=self.parse_reviews,
                 dont_filter=True,
                 meta={
-                    "restaurant_index": restaurant_index,
                     "restaurant_name": restaurant_name,
                     "feature_id": feature_id,
                     "gps_coordinate": gps_coordinate,
@@ -391,5 +393,5 @@ class GoogleSpider(scrapy.Spider):
             )
 
 
-# spider = GoogleSpider()
-# spider.save_restaurant_details()
+spider = GoogleSpider()
+spider.save_restaurant_details()
