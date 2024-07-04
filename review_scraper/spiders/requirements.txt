@@ -1,0 +1,8 @@
+beautifulsoup4==4.12.3
+numpy==1.23.1
+Pillow==9.2.0
+Pillow==10.4.0
+Requests==2.32.3
+Scrapy==2.11.2
+selenium==4.22.0
+webdriver_manager==4.0.1
