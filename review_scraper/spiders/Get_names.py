@@ -54,3 +54,5 @@ def scrape(batchsize=10):
 # list = scrape(5)
 # print(list)
 scrape(5)
+##NOTE: Code does not include saving of progress to json file, will need to use function from 
+##      google.py to save progress to json file.
