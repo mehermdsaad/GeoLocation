@@ -338,18 +338,18 @@ class GoogleSpider(scrapy.Spider):
         return list(zip(x, y))
 
     def scrape_restaurant_details(self, timeout=300, num_points=400):
+        # COMPLETE
         vertices =  [(24.459788, 54.314777),(24.393291, 54.523680),(24.484544, 54.643805),(24.564686, 54.458536)]
         pts = self.generate_points_in_quadrilateral(vertices,num_points=num_points)
 
         for i,pt in enumerate(pts):
-            if i>=385: #manual check please forgive my short sightedness :(
-                print("\nChecking ",i+1, "th Point, Total Unique Restaurants So Far:",len(self.restaurant_details.keys()))
-                current_dict = self.scrape_restaurant_details_at_gps(
-                    lat=pt[0], lon=pt[1], timeout=timeout
-                )
-                self.restaurant_details.update(current_dict)
+            print("\nChecking ",i+1, "th Point, Total Unique Restaurants So Far:",len(self.restaurant_details.keys()))
+            current_dict = self.scrape_restaurant_details_at_gps(
+                lat=pt[0], lon=pt[1], timeout=timeout
+            )
+            self.restaurant_details.update(current_dict)
 
-                self.save_progress(self.restaurant_details_file, self.restaurant_details)
+            self.save_progress(self.restaurant_details_file, self.restaurant_details)
         print("\nRestaurant name collection completed. Total restaurants found: ",len(self.restaurant_details.keys()))
 
     def scrape_restaurant_details_at_gps(
