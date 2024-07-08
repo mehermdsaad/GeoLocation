@@ -8,6 +8,7 @@ import shutil
 import time
 from urllib.parse import quote_plus
 
+import pandas as pd
 import numpy as np
 import requests
 import scrapy
@@ -22,12 +23,12 @@ from selenium.common.exceptions import (
 )
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 scraping_progress_file = "./logs/scraping_log.json"
+users_log_file = "./logs/users_log.json"
 restaurant_details_file = "./data/restaurant_details.json"
 restaurant_names_file = "./data/restaurant_names.json"
 scrape_data_file = "./reviews.csv"
@@ -50,24 +51,50 @@ class GoogleSpider(scrapy.Spider):
         self.restaurant_details = self.load_progress(self.restaurant_details_file)
         self.restaurant_names_file = restaurant_names_file
         self.restaurant_names = self.load_progress(self.restaurant_names_file)
+        self.users_log_file = users_log_file
+        self.users_log = self.load_progress(self.users_log_file)
 
         self.scrape_data_file = scrape_data_file
 
-    def scrape_restaurant_details_from_random_users(self, num_users=50):
-        with open(self.scrape_data_file, "r", newline="", encoding="utf-8") as csvfile:
-            reader = csv.DictReader(csvfile)
-            all_users = list(reader)
+    def scrape_restaurant_details_from_random_users(self, num_users=50,random_seed=None):
+        if random_seed is not None:
+            np.random.seed(random_seed)
 
-        # Randomly select N users
-        # NOTE: NEEDS IMPROVEMENTS
-        # - Select only one user only once - maybe use dicts?
-        # - Once you go thur one user, make sure you don't hit upon the same user again
-        # random.seed(42)
-        selected_users = random.sample(all_users, num_users)
+        # Read the CSV file
+        df = pd.read_csv(self.scrape_data_file)
+        columns = ["Reviewer","Reviewer ID","Num Reviews"]
+        df= df[columns]
+        
+        # Remove duplicate rows
+        df.drop_duplicates(inplace=True)
 
+        # Remove previously seen users
+        self.load_progress(self.users_log_file)
+        df = df[~df['Reviewer ID'].isin(self.users_log.keys())]
+    
+        
+        # Ensure num_reviews is numeric
+        df['Num Reviews'] = pd.to_numeric(df['Num Reviews'], errors='coerce')
+        df.dropna(subset=['Num Reviews'], inplace=True)
+        
+        # Calculate weights based on num_reviews
+        weights = df['Num Reviews'] / df['Num Reviews'].sum()
+        
+        # Perform weighted random sampling without replacement
+        sampled_indices = np.random.choice(
+            df.index, 
+            size=min(num_users, len(df)), 
+            replace=False, 
+            p=weights
+        )
+        
+        # Get the sampled users
+        sampled_users = df.loc[sampled_indices]
+        sampled_users_list = sampled_users.to_dict('records')
+        
         prev_restaurant_count = len(self.restaurant_details.keys())
         # Process each selected user
-        for i, user in enumerate(selected_users):
+        for i, user in enumerate(sampled_users_list):
             restaurant_count_before_user = len(self.restaurant_details.keys())
 
             username = user["Reviewer"]
@@ -81,6 +108,9 @@ class GoogleSpider(scrapy.Spider):
             print(
                 f"\nUser {i+1}: {user['Reviewer'][:20]:<20}\tUnique Restaurants from user: {(len(self.restaurant_details.keys())-restaurant_count_before_user):>4}. Total Restaurants: {len(self.restaurant_details.keys()):>6}"
             )
+
+            self.users_log[user_id]=username
+            self.save_progress(self.users_log_file,self.users_log)
 
         print(
             "\nRestaurant names collection completed. New restaurants found: ",
@@ -262,11 +292,6 @@ class GoogleSpider(scrapy.Spider):
             if not place_type_element:
                 print(f"[DESCRIPTION NOT FOUND],URL: {search_url}")
 
-                # box = soup.find("div", {"data-attrid": "title"})
-                # if box:
-                #     print(f"BOX LOCATED - {name} {address}")
-                # else:
-                #     print(f"NO BOX :) - {name} {address}")
                 return None, None
             place_type = place_type_element.get_text()
 
@@ -306,6 +331,7 @@ class GoogleSpider(scrapy.Spider):
             "sweets",
             "confectionary",
             "deli",
+            "coffee",
         ]
 
         # Check if the place_type contains any food-related keyword
@@ -655,6 +681,7 @@ class GoogleSpider(scrapy.Spider):
                 "GPS Coordinates",
                 "Reviewer",
                 "Reviewer ID",
+                "Num Reviews",
                 "Description",
                 "Rating",
                 "Review Date",
@@ -727,6 +754,17 @@ class GoogleSpider(scrapy.Spider):
             reviewer_id = review.xpath(
                 "substring-before(substring-after(.//div[@class='TSUbDb']/a[contains(@href, '/maps/contrib/')]/@href, '/contrib/'), '?')"
             ).extract_first()
+
+            num_reviews = review.css("span.A503be::text").extract_first()
+
+            if isinstance(num_reviews, str):
+                num_reviews = re.search(r'(\d+)\s*review', num_reviews)
+                if num_reviews:
+                    num_reviews=num_reviews.group(1)
+                else:
+                    num_reviews=0
+            else:
+                num_reviews = 0
 
             # GET THE DESCRIPTION
             description = review.xpath(
@@ -816,6 +854,7 @@ class GoogleSpider(scrapy.Spider):
                     "GPS Coordinates": gps_coordinate,
                     "Reviewer": reviewer,
                     "Reviewer ID": reviewer_id,
+                    "Num Reviews": num_reviews,
                     "Description": description,
                     "Rating": review_rating,
                     "Review Date": review_date,
