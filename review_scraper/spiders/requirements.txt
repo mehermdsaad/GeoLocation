@@ -1,9 +1,5 @@
 beautifulsoup4==4.12.3
 numpy==1.23.1
-<<<<<<< HEAD
-Pillow==9.2.0
-=======
->>>>>>> f0d65be (Added get_restaurant_names_from_random_users method)
 Pillow==10.4.0
 Requests==2.32.3
 Scrapy==2.11.2
