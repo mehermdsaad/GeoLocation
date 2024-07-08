@@ -2,10 +2,11 @@ import binascii
 import csv
 import json
 import os
+import random
 import re
 import shutil
-import random
 import time
+from urllib.parse import quote_plus
 
 import numpy as np
 import requests
@@ -26,11 +27,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-
 scraping_progress_file = "./logs/scraping_log.json"
 restaurant_details_file = "./data/restaurant_details.json"
 restaurant_names_file = "./data/restaurant_names.json"
 scrape_data_file = "./reviews.csv"
+
 
 class GoogleSpider(scrapy.Spider):
 
@@ -52,36 +53,45 @@ class GoogleSpider(scrapy.Spider):
 
         self.scrape_data_file = scrape_data_file
 
-    def scrape_restaurant_details_from_random_users(self,num_users=50):
-        with open(self.scrape_data_file, 'r', newline='') as csvfile:
+    def scrape_restaurant_details_from_random_users(self, num_users=50):
+        with open(self.scrape_data_file, "r", newline="", encoding="utf-8") as csvfile:
             reader = csv.DictReader(csvfile)
             all_users = list(reader)
 
         # Randomly select N users
+        # NOTE: NEEDS IMPROVEMENTS
+        # - Select only one user only once - maybe use dicts?
+        # - Once you go thur one user, make sure you don't hit upon the same user again
+        # random.seed(42)
         selected_users = random.sample(all_users, num_users)
 
         prev_restaurant_count = len(self.restaurant_details.keys())
         # Process each selected user
-        for user in selected_users:
+        for i, user in enumerate(selected_users):
             restaurant_count_before_user = len(self.restaurant_details.keys())
 
-            current_dict = self.scrape_restaurant_details_per_user(user["Reviewer ID"],username = user["Reviewer"])
+            username = user["Reviewer"]
+            user_id = user["Reviewer ID"]
+            print(f"\n{i+1:<3}: Looking at {username}, {user_id}:")
 
-            self.restaurant_details.update(current_dict)
-            # self.save_progress(self.restaurant_details_file, self.restaurant_details)
+            self.scrape_restaurant_details_per_user(user_id, username=username)
 
-            print(f"\nUser {user['Reviewer'][:20]:<20}\tUnique Restaurants from user: {(len(self.restaurant_details.keys())-restaurant_count_before_user):>4}. Total Restaurants: {len(self.restaurant_details.keys()):>6}")
-                
+            self.save_progress(self.restaurant_details_file, self.restaurant_details)
 
+            print(
+                f"\nUser {i+1}: {user['Reviewer'][:20]:<20}\tUnique Restaurants from user: {(len(self.restaurant_details.keys())-restaurant_count_before_user):>4}. Total Restaurants: {len(self.restaurant_details.keys()):>6}"
+            )
 
-        print("\nRestaurant names collection completed. New restaurants found: ",len(self.restaurant_details.keys())-prev_restaurant_count,". Total Restaurants: ",len(self.restaurant_details.keys()))       
+        print(
+            "\nRestaurant names collection completed. New restaurants found: ",
+            len(self.restaurant_details.keys()) - prev_restaurant_count,
+            ". Total Restaurants: ",
+            len(self.restaurant_details.keys()),
+        )
 
-    def scrape_restaurant_details_per_user(
-        self, user_id , username = "USER", timeout=300
-    ):
+    def scrape_restaurant_details_per_user(self, user_id, username="USER", timeout=300):
         url = f"https://www.google.com/maps/contrib/{user_id}/reviews?entry=ttu"
 
-        print(f"\nLooking at {username}, {user_id}:")
         chrome_options = webdriver.ChromeOptions()
         chrome_options.add_argument("--headless")  # Run in headless mode (optional)
 
@@ -89,126 +99,132 @@ class GoogleSpider(scrapy.Spider):
             service=Service(ChromeDriverManager().install()), options=chrome_options
         )
 
-
         try:
             driver.get(url)
 
             scrollable_div = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, 'div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde[aria-label="Reviews"]')
+                    (
+                        By.CSS_SELECTOR,
+                        'div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde[aria-label="Reviews"]',
+                    )
                 )
             )
 
-            restaurants = {}
-            last_height = driver.execute_script(
-                "return arguments[0].scrollHeight", scrollable_div
-            )
+            last_item_count = 0
+            extracted_data = []
+
+            def extract_data_from_item(item):
+                # Extract name and address from the item
+                # You'll need to adjust these XPaths based on the actual structure of your page
+                name_element = item.find_element(By.CSS_SELECTOR, ".d4r55.YJxk2d")
+                address_element = item.find_element(By.CSS_SELECTOR, "div.RfnDt.xJVozb")
+
+                name, address = None, None
+                if name_element:
+                    name = name_element.text.strip()
+                if address_element:
+                    address = address_element.text.strip()
+
+                return name, address
+
             start_time = time.time()
 
+            n_restaurants_before_user = len(self.restaurant_details.keys())
             while True:
-                
-                if time.time() - start_time > timeout:
-                    print(
-                        f"Timeout of {timeout} seconds reached. Returning current results."
-                    )
-                    break
-
-                # Scroll down to bottom
+                # Scroll the reviews div
                 driver.execute_script(
-                    "arguments[0].scrollTo(0, arguments[0].scrollHeight);",
-                    scrollable_div,
+                    "arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_div
                 )
 
-                # Wait to load page
                 try:
+                    # Wait for new items to load
                     WebDriverWait(driver, 10).until(
-                        lambda d: d.execute_script(
-                            "return arguments[0].scrollHeight", scrollable_div
+                        lambda d: len(
+                            d.find_elements(
+                                By.CSS_SELECTOR,
+                                "div.jftiEf.fontBodyMedium.t2Acle.FwTFEc.azD0p",
+                            )
                         )
-                        > last_height
+                        > last_item_count
                     )
-                except TimeoutException:
-                    print("No new content loaded. Assuming end of results.")
-                    break
 
-                # Calculate new scroll height and compare with last scroll height
-                new_height = driver.execute_script(
-                    "return arguments[0].scrollHeight", scrollable_div
-                )
-
-                # Get current restaurant entries
-                try:
-                    # Locate all parent divs that contain restaurant information
-                    restaurant_entries = scrollable_div.find_elements(
+                    # Get all items
+                    items = scrollable_div.find_elements(
                         By.CSS_SELECTOR, "div.jftiEf.fontBodyMedium.t2Acle.FwTFEc.azD0p"
                     )
-
-
-                    for entry in restaurant_entries:
+                    # Process only the new items
+                    for item in items[last_item_count:]:
                         try:
-                            # Find name and address within each entry
-                            name_element = entry.find_element(
-                                By.CSS_SELECTOR, ".d4r55.YJxk2d"
-                            )
-                            address_element = entry.find_element(
-                                By.CSS_SELECTOR, "div.RfnDt.xJVozb"
-                            )
-                            
-                            name, address = None, None
-                            if name_element:
-                                name = name_element.text.strip()
-                            if address_element:
-                                address = address_element.text.strip()
-
-                            # CHECK IF THE ADDRESS CONTAINS THE NAME ABU DHABI
-                            check_address = address.lower()
-                        
-                            # List of abu dhabi-related keywords
-                            address_keywords = [
-                                'abu dhabi','uae','united arab emirates'
-                            ]
-                            
-                            # Check if the address is in abu dhabi, could even be uae in general
-                            if not any(keyword in check_address for keyword in address_keywords):
-                                print(f"Update: Time {round(time.time() - start_time,2)}s. \t[NOT AD] Place name: {name[:20]:<20} Address: {address[:20]:<20}")
-                                continue
-
-                            fid,gps_coordinate = self.get_review_page_fid_gps_from_name(name,address)
-                            
-                            if not fid or not gps_coordinate:
-                                continue
-                            
-                            gps_list = gps_coordinate.split(",")
-
-                            # Convert to floating-point numbers
-                            lat = float(gps_list[0])
-                            lon = float(gps_list[1])
-
-                            if not self.is_point_in_quadrilateral(lat,lon):
-                                continue #OUTSIDE OUR BOX
-
-
-                            if fid not in restaurants:
-                                restaurants[fid] = {"name": name, "address": address, "gps_coordinates":gps_coordinate}
-                                
-                                print(f"Update: Time {round(time.time() - start_time,2)}s. \tRestaurant Name: {name[:20]:<20}\tAddress: {address[:10]:<10}\tFID: {fid:<20}\tTotal Restaurants:{len(restaurants):>4}")
-
-                        except Exception as e:
-                            # print(type(e).__name__, "Meeh don't worry ;)")
+                            name, address = extract_data_from_item(item)
+                        except Exception:
+                            # Sometimes there're no addresses. Ignore for now
                             continue
-                except StaleElementReferenceException:
-                    scrollable_div = driver.find_element(
-                        (By.CSS_SELECTOR, 'div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde[aria-label="Reviews"]')
-                    )
-                    continue
+                        # CHECK IF ABU DHABI OR NOT
+                        check_address = address.lower()
 
+                        # List of abu dhabi-related keywords
+                        address_keywords = ["abu dhabi"]
 
-                if new_height == last_height:
-                    print("Reached end of scroll.")
+                        if not any(
+                            keyword in check_address for keyword in address_keywords
+                        ):
+                            print(f"[NOT AD] Place name: {name} {address}")
+                            continue
+
+                        # GET FID, GPS NOTE: FIX THE ISSUES HERE
+                        fid, gps_coordinate = self.get_review_page_fid_gps_from_name(
+                            name, address
+                        )
+
+                        if not fid or not gps_coordinate:
+                            continue
+
+                        # CHECK IF UNIQUE OR NOT
+                        if self.restaurant_details.get(fid, None):
+                            continue  # THIS WE HAVE SEEN BEFORE
+
+                        # CHECK IF INSIDE BOX OR NOT
+                        gps_list = gps_coordinate.split(",")
+
+                        # Convert to floating-point numbers
+                        lat = float(gps_list[0])
+                        lon = float(gps_list[1])
+
+                        if not self.is_point_in_quadrilateral(lat, lon):
+                            continue  # OUTSIDE OUR BOX
+
+                        # CHECKS SUCCESSFUL, UNIQUE RESTAURANT FOUND:
+                        self.restaurant_details[fid] = {
+                            "name": name,
+                            "address": address,
+                            "gps_coordinates": gps_coordinate,
+                        }
+
+                        print(
+                            f"[FOUND]\t Name: {name}\t: {address:<30}\tTotal Unique Restaurants:{len(self.restaurant_details.keys())-n_restaurants_before_user:>4}"
+                        )
+                    # Update the count
+                    new_item_count = len(items)
+                    print(f"Processed {new_item_count - last_item_count} new items")
+                    last_item_count = new_item_count
+
+                    # Check if we've reached the bottom
+                    if driver.execute_script(
+                        "return arguments[0].scrollHeight - arguments[0].scrollTop === arguments[0].clientHeight;",
+                        scrollable_div,
+                    ):
+                        break
+
+                except TimeoutException:
+                    print("No new items loaded, probably reached the end")
                     break
-                last_height = new_height
 
-            return restaurants
+            print(
+                f"Finished processing all items. Total extracted: {len(extracted_data)}"
+            )
+
+            # return restaurants
 
         finally:
             driver.quit()
@@ -225,37 +241,79 @@ class GoogleSpider(scrapy.Spider):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
+        address = address.split("Abu Dhabi - United Arab Emirates")[0]
+        search_text = name + " " + address
+        # search_text = search_text.replace(" ", "+")
 
-        search_url = f"https://www.google.com/search?q={name+address}+Abu+Dhabi+reviews"
+        search_text = quote_plus(search_text)
+        search_url = f"https://www.google.com/search?q={search_text}+Abu+Dhabi+reviews"
 
         response = requests.get(search_url, headers=headers)
         soup = BeautifulSoup(response.text, "html.parser")
 
         # Check if restaurant or not:
-        place_type_element = soup.find("div", {"data-attrid": "kc:/local:one line summary"})
+        place_type_element = soup.find(
+            "div", {"data-attrid": "kc:/local:one line summary"}
+        )
         if place_type_element:
             place_type = place_type_element.get_text()
         else:
             place_type_element = soup.find("div", {"data-attrid": "subtitle"})
             if not place_type_element:
-                print(f"Place description not found, Place name: {name[:20]:<20} Address: {address[:20]:<20}")
+                print(f"[DESCRIPTION NOT FOUND],URL: {search_url}")
+
+                # box = soup.find("div", {"data-attrid": "title"})
+                # if box:
+                #     print(f"BOX LOCATED - {name} {address}")
+                # else:
+                #     print(f"NO BOX :) - {name} {address}")
+                return None, None
             place_type = place_type_element.get_text()
 
         place_type = place_type.lower()
-    
+
         # List of food-related keywords
         food_keywords = [
-            'restaurant', 'cafe', 'cafeteria', 'bakery', 'bistro', 'diner',
-            'eatery', 'grill', 'pizzeria', 'steakhouse', 'tavern', 'trattoria',
-            'fast food', 'food court', 'buffet', 'coffee shop', 'ice cream parlor',
-            'sandwich shop', 'sushi bar', 'tea house', 'pub', 'bar & grill',
-            'food truck', 'delicatessen', 'patisserie', 'creperie', 'brasserie','dessert'
+            "restaurant",
+            "cafe",
+            "cafeteria",
+            "bakery",
+            "bistro",
+            "diner",
+            "eatery",
+            "grill",
+            "pizzeria",
+            "steakhouse",
+            "tavern",
+            "trattoria",
+            "fast food",
+            "food court",
+            "buffet",
+            "coffee shop",
+            "ice cream parlor",
+            "sandwich shop",
+            "sushi bar",
+            "tea house",
+            "pub",
+            "bar & grill",
+            "food truck",
+            "delicatessen",
+            "patisserie",
+            "creperie",
+            "brasserie",
+            "dessert",
+            "pastry",
+            "sweets",
+            "confectionary",
+            "deli",
         ]
-        
+
         # Check if the place_type contains any food-related keyword
         if not any(keyword in place_type for keyword in food_keywords):
-            print(f"[NOT RESTAURANT] Place name: {name[:20]:<20} Address: {address[:20]:<20}")
-            return None,None
+            print(
+                f"[NOT RESTAURANT] Place name: {name[:20]:<20} Address: {address[:20]:<20}"
+            )
+            return None, None
         # Else this is a place to eat
 
         # Find the review link
@@ -286,22 +344,29 @@ class GoogleSpider(scrapy.Spider):
         -- NOTE: Might need to implement a log system for getting the fid,gps since captcha and other stuff might be a hurdle
         """
 
-        for name,address in self.restaurant_names.items():
-            fid, gps_coordinate = self.get_review_page_fid_gps_from_name(name,address)
+        for name, address in self.restaurant_names.items():
+            fid, gps_coordinate = self.get_review_page_fid_gps_from_name(name, address)
             if fid:
-                self.restaurant_details[fid] = {"name": name, "address": address, "gps_coordinates":gps_coordinate}
+                self.restaurant_details[fid] = {
+                    "name": name,
+                    "address": address,
+                    "gps_coordinates": gps_coordinate,
+                }
 
             del self.restaurant_names[name]
-        self.save_progress(self.restaurant_names_file,self.restaurant_names)
-        self.save_progress(self.restaurant_details_file,self.restaurant_details)
+        self.save_progress(self.restaurant_names_file, self.restaurant_names)
+        self.save_progress(self.restaurant_details_file, self.restaurant_details)
 
-    def is_point_in_quadrilateral(self,lat, lon):
-        vertices = [(24.441665, 54.257385),(24.061811, 54.665366),(24.540004, 55.056711),(24.899426, 54.506009)]# A GENEROUS BOUNDARY OF ABU DHABI
-
+    def is_point_in_quadrilateral(self, lat, lon):
+        vertices = [
+            (24.441665, 54.257385),
+            (24.061811, 54.665366),
+            (24.540004, 55.056711),
+            (24.899426, 54.506009),
+        ]  # A GENEROUS BOUNDARY OF ABU DHABI
 
         def is_left(p0, p1, p2):
-            return ((p1[0] - p0[0]) * (p2[1] - p0[1]) - 
-                    (p2[0] - p0[0]) * (p1[1] - p0[1]))
+            return (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1])
 
         wn = 0  # winding number
 
@@ -339,23 +404,38 @@ class GoogleSpider(scrapy.Spider):
 
     def scrape_restaurant_details(self, timeout=300, num_points=400):
         # COMPLETE
-        vertices =  [(24.459788, 54.314777),(24.393291, 54.523680),(24.484544, 54.643805),(24.564686, 54.458536)]
-        pts = self.generate_points_in_quadrilateral(vertices,num_points=num_points)
+        vertices = [
+            (24.459788, 54.314777),
+            (24.393291, 54.523680),
+            (24.484544, 54.643805),
+            (24.564686, 54.458536),
+        ]
+        pts = self.generate_points_in_quadrilateral(vertices, num_points=num_points)
 
-        for i,pt in enumerate(pts):
-            print("\nChecking ",i+1, "th Point, Total Unique Restaurants So Far:",len(self.restaurant_details.keys()))
+        for i, pt in enumerate(pts):
+            print(
+                "\nChecking ",
+                i + 1,
+                "th Point, Total Unique Restaurants So Far:",
+                len(self.restaurant_details.keys()),
+            )
             current_dict = self.scrape_restaurant_details_at_gps(
                 lat=pt[0], lon=pt[1], timeout=timeout
             )
             self.restaurant_details.update(current_dict)
 
             self.save_progress(self.restaurant_details_file, self.restaurant_details)
-        print("\nRestaurant name collection completed. Total restaurants found: ",len(self.restaurant_details.keys()))
+        print(
+            "\nRestaurant name collection completed. Total restaurants found: ",
+            len(self.restaurant_details.keys()),
+        )
 
     def scrape_restaurant_details_at_gps(
         self, lat=24.5264811, lon=54.4092652, timeout=300
     ):
-        url = f"https://www.google.com/maps/search/Restaurants/@{lat},{lon},15z?entry=ttu"
+        url = (
+            f"https://www.google.com/maps/search/Restaurants/@{lat},{lon},15z?entry=ttu"
+        )
 
         print(f"\nLooking at {lat},{lon}:")
         chrome_options = webdriver.ChromeOptions()
@@ -368,8 +448,7 @@ class GoogleSpider(scrapy.Spider):
         def extract_info_from_url(input_str):
             # Extract fid
             data_index = input_str.find("data=")
-            data_str = input_str[data_index + len("data="):]
-                
+            data_str = input_str[data_index + len("data=") :]
 
             end_index = data_str.find("!", 12)
             fid = data_str[11:end_index]
@@ -383,7 +462,7 @@ class GoogleSpider(scrapy.Spider):
             lon_end_index = data_str.find("!", lon_start_index)
             lon = data_str[lon_start_index:lon_end_index]
 
-            gps_coordinate = lat+","+lon
+            gps_coordinate = lat + "," + lon
 
             return fid, gps_coordinate
 
@@ -403,7 +482,7 @@ class GoogleSpider(scrapy.Spider):
             start_time = time.time()
 
             while True:
-                
+
                 if time.time() - start_time > timeout:
                     print(
                         f"Timeout of {timeout} seconds reached. Returning current results."
@@ -440,7 +519,6 @@ class GoogleSpider(scrapy.Spider):
                         By.CSS_SELECTOR, "div.Nv2PK.THOPZb.CpccDe"
                     )
 
-
                     for entry in restaurant_entries:
                         try:
                             # Find name and address within each entry
@@ -457,8 +535,8 @@ class GoogleSpider(scrapy.Spider):
                             url_str = entry.find_element(
                                 By.XPATH, "./a[@class='hfpxzc']"
                             ).get_attribute("href")
-                            
-                            fid,gps_coordinate = extract_info_from_url(url_str)
+
+                            fid, gps_coordinate = extract_info_from_url(url_str)
 
                             gps_list = gps_coordinate.split(",")
 
@@ -466,20 +544,25 @@ class GoogleSpider(scrapy.Spider):
                             lat = float(gps_list[0])
                             lon = float(gps_list[1])
 
-                            if not self.is_point_in_quadrilateral(lat,lon):
-                                continue #OUTSIDE OUR BOX
-                            
+                            if not self.is_point_in_quadrilateral(lat, lon):
+                                continue  # OUTSIDE OUR BOX
+
                             name, address = None, None
                             if name_element:
                                 name = name_element.text.strip()
                             if address_element:
                                 address = address_element.text.strip()
 
-
                             if fid not in restaurants:
-                                restaurants[fid] = {"name": name, "address": address, "gps_coordinates":gps_coordinate}
-                                
-                                print(f"Update: Time {round(time.time() - start_time,2)}s. \tRestaurant Name: {name[:20]:<20}\tAddress: {address[:10]:<10}\tFID: {fid:<20}\tTotal Restaurants:{len(restaurants):>4}")
+                                restaurants[fid] = {
+                                    "name": name,
+                                    "address": address,
+                                    "gps_coordinates": gps_coordinate,
+                                }
+
+                                print(
+                                    f"Update: Time {round(time.time() - start_time,2)}s. \tRestaurant Name: {name[:20]:<20}\tAddress: {address[:10]:<10}\tFID: {fid:<20}\tTotal Restaurants:{len(restaurants):>4}"
+                                )
 
                         except Exception as e:
                             # print(type(e).__name__, "Meeh don't worry ;)")
@@ -738,7 +821,7 @@ class GoogleSpider(scrapy.Spider):
                     "Review Date": review_date,
                     "Image Filename": image_names_str,
                 }
-                self.save_to_csv(self.scrape_data_file,data_row)
+                self.save_to_csv(self.scrape_data_file, data_row)
 
             review_i += 1
 
@@ -778,7 +861,8 @@ class GoogleSpider(scrapy.Spider):
                 },
             )
 
+
 spider = GoogleSpider()
-# spider.scrape_restaurant_details_from_random_users()
-spider.scrape_restaurant_details()
+spider.scrape_restaurant_details_from_random_users(num_users=500)
+# spider.scrape_restaurant_details()
 # spider.save_restaurant_details_from_names()
