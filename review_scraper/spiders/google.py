@@ -33,6 +33,13 @@ restaurant_details_file = "./data/restaurant_details.json"
 restaurant_names_file = "./data/restaurant_names.json"
 scrape_data_file = "./reviews.csv"
 
+COUNTRIES = ["Saudi Arabia","United Arab Emirates","Lebanon","Egypt","Qatar"]
+NUM_RESTAURANTS_PER_COUNTRY = 50
+MAX_NUM_CITIES_PER_COUNTRY = 10
+MAX_NUM_RESTAURANTS_PER_CITY = 20
+NUM_REVIEWS_THRESHHOLD = 500
+NUM_IMGS_TO_DOWNLOAD = 100
+MAX_NUM_IMGS_PER_USER = 5
 
 class GoogleSpider(scrapy.Spider):
 
@@ -45,6 +52,12 @@ class GoogleSpider(scrapy.Spider):
 
     def __init__(self, *args, **kwargs):
         super(GoogleSpider, self).__init__(*args, **kwargs)
+
+        self.HEADERS = {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36 Edg/87.0.664.66",
+            "referer": None,
+        }
+        
         self.scraping_progress_file = scraping_progress_file
         self.scraping_progress = self.load_progress(self.scraping_progress_file)
         self.restaurant_details_file = restaurant_details_file
@@ -56,210 +69,183 @@ class GoogleSpider(scrapy.Spider):
 
         self.scrape_data_file = scrape_data_file
 
-    def scrape_restaurant_details_from_random_users(self, num_users=50,random_seed=None):
-        if random_seed is not None:
-            np.random.seed(random_seed)
+    def scrape_restaurant_names_from_country(self,countries):
 
-        # Read the CSV file
-        df = pd.read_csv(self.scrape_data_file)
-        columns = ["Reviewer","Reviewer ID","Num Reviews"]
-        df= df[columns]
-        
-        # Remove duplicate rows
-        df.drop_duplicates(inplace=True)
+        for country_name in countries:
+            country_search = country_name.replace(" ", "-")
 
-        # Remove previously seen users
-        self.load_progress(self.users_log_file)
-        df = df[~df['Reviewer ID'].isin(self.users_log.keys())]
-    
-        
-        # Ensure num_reviews is numeric
-        df['Num Reviews'] = pd.to_numeric(df['Num Reviews'], errors='coerce')
-        df.dropna(subset=['Num Reviews'], inplace=True)
-        
-        # Calculate weights based on num_reviews
-        weights = df['Num Reviews'] / df['Num Reviews'].sum()
-        
-        # Perform weighted random sampling without replacement
-        sampled_indices = np.random.choice(
-            df.index, 
-            size=min(num_users, len(df)), 
-            replace=False, 
-            p=weights
-        )
-        
-        # Get the sampled users
-        sampled_users = df.loc[sampled_indices]
-        sampled_users_list = sampled_users.to_dict('records')
-        
-        prev_restaurant_count = len(self.restaurant_details.keys())
-        # Process each selected user
-        for i, user in enumerate(sampled_users_list):
-            restaurant_count_before_user = len(self.restaurant_details.keys())
+            """SELENIUM IS THE WAY"""
 
-            username = user["Reviewer"]
-            user_id = user["Reviewer ID"]
-            print(f"\n{i+1:<3}: Looking at {username}, {user_id}:")
 
-            self.scrape_restaurant_details_per_user(user_id, username=username)
+            url = f"https://t.restaurantguru.com/restaurant-{country_search}-t1/"
 
-            self.save_progress(self.restaurant_details_file, self.restaurant_details)
+            chrome_options = webdriver.ChromeOptions()
+            chrome_options.add_argument("--headless")  # Run in headless mode (optional)
 
-            print(
-                f"\nUser {i+1}: {user['Reviewer'][:20]:<20}\tUnique Restaurants from user: {(len(self.restaurant_details.keys())-restaurant_count_before_user):>4}. Total Restaurants: {len(self.restaurant_details.keys()):>6}"
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()), options=chrome_options
             )
 
-            self.users_log[user_id]=username
-            self.save_progress(self.users_log_file,self.users_log)
+            self.restaurant_details = self.load_progress(self.restaurant_details_file)
+            load_last_item_count = self.restaurant_details.get("last_item_count",0) # DEFAULT START VALUE SHOULD BE 0 BUT 100 IS CHOSEN FOR KICKSTARTING
+            self.restaurant_details.pop("last_item_count",None)
 
-        print(
-            "\nRestaurant names collection completed. New restaurants found: ",
-            len(self.restaurant_details.keys()) - prev_restaurant_count,
-            ". Total Restaurants: ",
-            len(self.restaurant_details.keys()),
-        )
+            cities = {}
 
-    def scrape_restaurant_details_per_user(self, user_id, username="USER", timeout=300):
-        url = f"https://www.google.com/maps/contrib/{user_id}/reviews?entry=ttu"
+            cnt = 0
+            for item in self.restaurant_details.values():
+                if item["country_name"] == country_name:
+                    cnt += 1
+                    cities[item["city_name"]] = cities.get(item["city_name"],0)+1
+            if cnt==50:
+                continue
+            
 
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument("--headless")  # Run in headless mode (optional)
+            try:
+                driver.get(url)
 
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=chrome_options
-        )
+                last_item_count = 0
 
-        try:
-            driver.get(url)
+                while True:
+                    
+                    driver.execute_script("window.scrollTo(0,document.body.scrollHeight);")
 
-            scrollable_div = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located(
-                    (
-                        By.CSS_SELECTOR,
-                        'div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde[aria-label="Reviews"]',
-                    )
-                )
-            )
-
-            last_item_count = 0
-            extracted_data = []
-
-            def extract_data_from_item(item):
-                # Extract name and address from the item
-                # You'll need to adjust these XPaths based on the actual structure of your page
-                name_element = item.find_element(By.CSS_SELECTOR, ".d4r55.YJxk2d")
-                address_element = item.find_element(By.CSS_SELECTOR, "div.RfnDt.xJVozb")
-
-                name, address = None, None
-                if name_element:
-                    name = name_element.text.strip()
-                if address_element:
-                    address = address_element.text.strip()
-
-                return name, address
-
-            start_time = time.time()
-
-            n_restaurants_before_user = len(self.restaurant_details.keys())
-            while True:
-                # Scroll the reviews div
-                driver.execute_script(
-                    "arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_div
-                )
-
-                try:
-                    # Wait for new items to load
-                    WebDriverWait(driver, 10).until(
-                        lambda d: len(
-                            d.find_elements(
-                                By.CSS_SELECTOR,
-                                "div.jftiEf.fontBodyMedium.t2Acle.FwTFEc.azD0p",
+                    try:
+                        # Wait for new items to load
+                        WebDriverWait(driver, 5).until(
+                            lambda d: len(
+                                d.find_elements(
+                                    By.CSS_SELECTOR,
+                                    "div.wrapper_info",
+                                )
                             )
-                        )
-                        > last_item_count
-                    )
-
-                    # Get all items
-                    items = scrollable_div.find_elements(
-                        By.CSS_SELECTOR, "div.jftiEf.fontBodyMedium.t2Acle.FwTFEc.azD0p"
-                    )
-                    # Process only the new items
-                    for item in items[last_item_count:]:
-                        try:
-                            name, address = extract_data_from_item(item)
-                        except Exception:
-                            # Sometimes there're no addresses. Ignore for now
-                            continue
-                        # CHECK IF ABU DHABI OR NOT
-                        check_address = address.lower()
-
-                        # List of abu dhabi-related keywords
-                        address_keywords = ["abu dhabi"]
-
-                        if not any(
-                            keyword in check_address for keyword in address_keywords
-                        ):
-                            print(f"[NOT AD] Place name: {name} {address}")
-                            continue
-
-                        # GET FID, GPS NOTE: FIX THE ISSUES HERE
-                        fid, gps_coordinate = self.get_review_page_fid_gps_from_name(
-                            name, address
+                            > last_item_count
                         )
 
-                        if not fid or not gps_coordinate:
-                            continue
-
-                        # CHECK IF UNIQUE OR NOT
-                        if self.restaurant_details.get(fid, None):
-                            continue  # THIS WE HAVE SEEN BEFORE
-
-                        # CHECK IF INSIDE BOX OR NOT
-                        gps_list = gps_coordinate.split(",")
-
-                        # Convert to floating-point numbers
-                        lat = float(gps_list[0])
-                        lon = float(gps_list[1])
-
-                        if not self.is_point_in_quadrilateral(lat, lon):
-                            continue  # OUTSIDE OUR BOX
-
-                        # CHECKS SUCCESSFUL, UNIQUE RESTAURANT FOUND:
-                        self.restaurant_details[fid] = {
-                            "name": name,
-                            "address": address,
-                            "gps_coordinates": gps_coordinate,
-                        }
-
-                        print(
-                            f"[FOUND]\t Name: {name}\t: {address:<30}\tTotal Unique Restaurants:{len(self.restaurant_details.keys())-n_restaurants_before_user:>4}"
+                        # Get all items
+                        items = driver.find_elements(
+                            By.CSS_SELECTOR, "div.wrapper_info"
                         )
-                    # Update the count
-                    new_item_count = len(items)
-                    print(f"Processed {new_item_count - last_item_count} new items")
-                    last_item_count = new_item_count
+                        # Process only the new items
+                        if len(items)<load_last_item_count:
+                            last_item_count = len(items)
+                            print("Previously checked items, please wait ",last_item_count)
+                            continue
+                        
+                        for item in items[last_item_count:]:
+                            try:
 
-                    # Check if we've reached the bottom
-                    if driver.execute_script(
-                        "return arguments[0].scrollHeight - arguments[0].scrollTop === arguments[0].clientHeight;",
-                        scrollable_div,
-                    ):
+                                if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
+                                    break
+
+                                name_element = item.find_element(
+                                    By.CSS_SELECTOR, "a.notranslate.title_url"
+                                )
+                                restaurant_name = name_element.text
+                                restaurant_url = name_element.get_attribute('href')
+                                
+                                city_name = ""
+                                try:
+                                    city_string = item.find_element(
+                                        By.CSS_SELECTOR, "div.number"
+                                    ).text
+                                    marker = "to eat in "
+                                    start_index = city_string.find(marker)
+                                    city_name = city_string[start_index + len(marker):].strip()
+
+                                    
+                                    closed_or_not = item.find_element(
+                                        By.CSS_SELECTOR, "div.closed_info_block"
+                                    )
+                                    if closed_or_not:
+                                        closed_or_not = closed_or_not.text
+                                        if "permanently closed" in closed_or_not.lower():
+                                            continue
+                                except Exception as e:
+                                    # print(f"[JUST PASSING],{e}")
+                                    pass
+                                
+
+                                if city_name:
+                                    if len(cities.keys())>=MAX_NUM_CITIES_PER_COUNTRY and city_name not in cities.keys():
+                                        continue
+
+                                    if cities.get(city_name,0) >= MAX_NUM_RESTAURANTS_PER_CITY:
+                                        continue
+                                    
+                                    fid,gps_coordinate,city_name,search_url = self.get_review_page_fid_gps_from_name(restaurant_name,city_name=city_name,country_name=country_name)
+
+                                    if not fid or not gps_coordinate or not city_name:
+                                        continue
+                                else:
+                                    fid,gps_coordinate,city_name,search_url = self.get_review_page_fid_gps_from_name(restaurant_name,city_name=city_name,country_name=country_name)
+                                    
+                                    if not fid or not gps_coordinate or not city_name:
+                                        continue
+
+                                    if len(cities.keys())>=MAX_NUM_CITIES_PER_COUNTRY and city_name not in cities.keys():
+                                        continue
+
+                                    if cities.get(city_name,0) >= MAX_NUM_RESTAURANTS_PER_CITY:
+                                        continue
+
+
+                                
+
+                                if not self.restaurant_details.get(fid,None):
+                                    self.restaurant_details[fid] = {"restaurant_name":restaurant_name,"city_name":city_name,"country_name":country_name,"url":search_url,"gps_coordinates":gps_coordinate}
+                                    cities[city_name] = cities.get(city_name,0) + 1
+                                    print(f"[FOUND] CNT:{cnt+1} - {country_name} --- {city_name} --- {restaurant_name}")
+                                else:
+                                    continue
+
+                                cnt+=1
+                                if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
+
+                                    break
+                        
+                            except Exception as e:
+                                print("EXCEPTION OCCURED: ",e)
+                        
+                        
+                        
+
+                        new_item_count = len(items)
+                        
+                        self.restaurant_details["last_item_count"] = new_item_count
+                        if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
+                            self.restaurant_details.pop("last_item_count",None)
+                        self.save_progress(self.restaurant_details_file,self.restaurant_details)
+                        # Update the count
+                        
+                        print(f"Processed {new_item_count - last_item_count} new items.\tCity dict: {cities}, CNT: {cnt}")
+                        last_item_count = new_item_count
+
+
+                        if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
+                            self.restaurant_details.pop("last_item_count",None)
+                            break
+
+                        # Check if we've reached the bottom
+                        if driver.execute_script("return document.documentElement.scrollHeight - document.documentElement.scrollTop <= document.documentElement.clientHeight + 1;"):
+                            break
+                        
+
+                        
+                    except TimeoutException:
+                        print("No new items loaded, probably reached the end: URL" , url)
                         break
 
-                except TimeoutException:
-                    print("No new items loaded, probably reached the end")
-                    break
+                print(
+                    f"Finished processing all items. Total extracted: {cnt}"
+                )
+                self.restaurant_details.pop("last_item_count",None)
 
-            print(
-                f"Finished processing all items. Total extracted: {len(extracted_data)}"
-            )
 
-            # return restaurants
+            finally:
+                driver.quit()
 
-        finally:
-            driver.quit()
-
-    def get_review_page_fid_gps_from_name(self, name, address=""):
+    def get_review_page_fid_gps_from_name(self, restaurant_name, city_name="", country_name=""):
         """
         Searches for the restaurant name and returns the feature_id and gps_coordinates of the reviews page.
         This method uses requests and BeautifulSoup instead of Selenium for faster performance.
@@ -271,88 +257,52 @@ class GoogleSpider(scrapy.Spider):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        address = address.split("Abu Dhabi - United Arab Emirates")[0]
-        search_text = name + " " + address
+        # address = address.split("Abu Dhabi - United Arab Emirates")[0]
+        # if city_name:
+        #     print("FID: CITY NAME")
+
+        if city_name:
+            search_texts = [f"{restaurant_name} {city_name} {country_name}",f"{restaurant_name} restaurant {city_name} {country_name}",f"{restaurant_name} {country_name}",f"{restaurant_name} restaurant {country_name}",f"{restaurant_name} {city_name}",f"{restaurant_name} {city_name} restaurant"]
+        else:
+            search_texts = [f"{restaurant_name} {city_name} {country_name}",f"{restaurant_name} restaurant {city_name} {country_name}",f"{restaurant_name} {country_name}",f"{restaurant_name} restaurant {country_name}"]
+
         # search_text = search_text.replace(" ", "+")
 
-        search_text = quote_plus(search_text)
-        search_url = f"https://www.google.com/search?q={search_text}+Abu+Dhabi+reviews"
+        for search_text in search_texts:
+            search_text = quote_plus(search_text)
+            search_url = f"https://www.google.com/search?q={search_text}+reviews"
 
-        response = requests.get(search_url, headers=headers)
-        soup = BeautifulSoup(response.text, "html.parser")
+            response = requests.get(search_url, headers=self.HEADERS)
 
-        # Check if restaurant or not:
-        place_type_element = soup.find(
-            "div", {"data-attrid": "kc:/local:one line summary"}
-        )
-        if place_type_element:
-            place_type = place_type_element.get_text()
-        else:
-            place_type_element = soup.find("div", {"data-attrid": "subtitle"})
-            if not place_type_element:
-                print(f"[DESCRIPTION NOT FOUND],URL: {search_url}")
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 60))
+                print(f"Rate limit exceeded. Waiting for {retry_after} seconds")
+                time.sleep(retry_after)
+            
+            
+            soup = BeautifulSoup(response.text, "html.parser")
 
-                return None, None
-            place_type = place_type_element.get_text()
-
-        place_type = place_type.lower()
-
-        # List of food-related keywords
-        food_keywords = [
-            "restaurant",
-            "cafe",
-            "cafeteria",
-            "bakery",
-            "bistro",
-            "diner",
-            "eatery",
-            "grill",
-            "pizzeria",
-            "steakhouse",
-            "tavern",
-            "trattoria",
-            "fast food",
-            "food court",
-            "buffet",
-            "coffee shop",
-            "ice cream parlor",
-            "sandwich shop",
-            "sushi bar",
-            "tea house",
-            "pub",
-            "bar & grill",
-            "food truck",
-            "delicatessen",
-            "patisserie",
-            "creperie",
-            "brasserie",
-            "dessert",
-            "pastry",
-            "sweets",
-            "confectionary",
-            "deli",
-            "coffee",
-        ]
-
-        # Check if the place_type contains any food-related keyword
-        if not any(keyword in place_type for keyword in food_keywords):
-            print(
-                f"[NOT RESTAURANT] Place name: {name[:20]:<20} Address: {address[:20]:<20}"
-            )
-            return None, None
-        # Else this is a place to eat
-
-        # Find the review link
-        review_link = soup.find("a", {"data-async-trigger": "reviewDialog"})
+            # Find the review link
+            review_link = soup.find("a", {"data-async-trigger": "reviewDialog"})
+            if review_link:
+                break
         if not review_link:
-            return None, None
+            print("ISSUE FOUND")
+            return None, None, None, None
 
         fid = review_link.get("data-fid")
+
+        num_reviews_string = soup.find("a",{"data-fid":fid}).get_text()
+
+        match = re.search(r'([\d,]+)', num_reviews_string)
+        num_reviews = int(match.group(1).replace(',', ''))
+        if num_reviews<NUM_REVIEWS_THRESHHOLD:
+            return None, None, None, None
 
         # Find the map link
         map_link = soup.find("a", {"data-url": re.compile(r"@[-\d\.]+,[-\d\.]+")})
         if not map_link:
-            return fid, None
+            return None, None, None, None
 
         url = map_link.get("data-url")
         match = re.search(r"@([-\d\.]+),([-\d\.]+)", url)
@@ -361,266 +311,32 @@ class GoogleSpider(scrapy.Spider):
         else:
             gps_coordinate = None
 
-        return fid, gps_coordinate
+        # CITY CHECK
+        if city_name:
+            return fid, gps_coordinate, city_name, search_url
+        else:
+            # WE GET THE CITY NAME
+            address = soup.find("span",class_="LrzXr").get_text()    
 
-    def save_restaurant_details_from_names(self):
-        """Helper method to get feature_ids and gps_coordinates from restaurant_names. Takes a list of restaurant names.
-        Returns the lists feature_id,gps_coordinates
-        -- NOTE: This makes use of Selenium, so captcha might be an issue
-        -- NOTE: Might need to implement a log system for getting the fid,gps since captcha and other stuff might be a hurdle
-        """
+            parts = address.split(',')
+    
+            # Remove the last part (country) and any leading/trailing whitespace
+            parts = [part.strip() for part in parts[:-1]]
+            
+            # Get the second to last part, which should contain the city
+            city_part = parts[-1]
+            
+            # Split this part by spaces
+            city_words = city_part.split()
+            
+            # Filter out any parts that are purely numeric
+            city_words = [word for word in city_words if not word.isdigit()]
+            
+            # Join the remaining words to form the city name
+            city_name = ' '.join(city_words)
 
-        for name, address in self.restaurant_names.items():
-            fid, gps_coordinate = self.get_review_page_fid_gps_from_name(name, address)
-            if fid:
-                self.restaurant_details[fid] = {
-                    "name": name,
-                    "address": address,
-                    "gps_coordinates": gps_coordinate,
-                }
-
-            del self.restaurant_names[name]
-        self.save_progress(self.restaurant_names_file, self.restaurant_names)
-        self.save_progress(self.restaurant_details_file, self.restaurant_details)
-
-    def is_point_in_quadrilateral(self, lat, lon):
-        vertices = [
-            (24.441665, 54.257385),
-            (24.061811, 54.665366),
-            (24.540004, 55.056711),
-            (24.899426, 54.506009),
-        ]  # A GENEROUS BOUNDARY OF ABU DHABI
-
-        def is_left(p0, p1, p2):
-            return (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1])
-
-        wn = 0  # winding number
-
-        for i in range(4):
-            if vertices[i][1] <= lon:
-                if vertices[(i + 1) % 4][1] > lon:
-                    if is_left(vertices[i], vertices[(i + 1) % 4], (lat, lon)) > 0:
-                        wn += 1
-            else:
-                if vertices[(i + 1) % 4][1] <= lon:
-                    if is_left(vertices[i], vertices[(i + 1) % 4], (lat, lon)) < 0:
-                        wn -= 1
-
-        return wn != 0
-
-    def generate_points_in_quadrilateral(self, vertices, num_points=4):
-        (x1, y1) = vertices[0]
-        (x2, y2) = vertices[1]
-        (x3, y3) = vertices[2]
-        (x4, y4) = vertices[3]
-
-        # Calculate the number of points along each dimension
-        n = int(np.sqrt(num_points))
-
-        # Generate a grid of points in the unit square
-        u, v = np.meshgrid(np.linspace(0, 1, n), np.linspace(0, 1, n))
-        u, v = u.flatten(), v.flatten()
-
-        # Perform bilinear interpolation
-        x = (1 - u) * (1 - v) * x1 + u * (1 - v) * x2 + u * v * x3 + (1 - u) * v * x4
-        y = (1 - u) * (1 - v) * y1 + u * (1 - v) * y2 + u * v * y3 + (1 - u) * v * y4
-
-        # Combine x and y into a list of tuples
-        return list(zip(x, y))
-
-    def scrape_restaurant_details(self, timeout=300, num_points=400):
-        # COMPLETE
-        vertices = [
-            (24.459788, 54.314777),
-            (24.393291, 54.523680),
-            (24.484544, 54.643805),
-            (24.564686, 54.458536),
-        ]
-        pts = self.generate_points_in_quadrilateral(vertices, num_points=num_points)
-
-        for i, pt in enumerate(pts):
-            print(
-                "\nChecking ",
-                i + 1,
-                "th Point, Total Unique Restaurants So Far:",
-                len(self.restaurant_details.keys()),
-            )
-            current_dict = self.scrape_restaurant_details_at_gps(
-                lat=pt[0], lon=pt[1], timeout=timeout
-            )
-            self.restaurant_details.update(current_dict)
-
-            self.save_progress(self.restaurant_details_file, self.restaurant_details)
-        print(
-            "\nRestaurant name collection completed. Total restaurants found: ",
-            len(self.restaurant_details.keys()),
-        )
-
-    def scrape_restaurant_details_at_gps(
-        self, lat=24.5264811, lon=54.4092652, timeout=300
-    ):
-        url = (
-            f"https://www.google.com/maps/search/Restaurants/@{lat},{lon},15z?entry=ttu"
-        )
-
-        print(f"\nLooking at {lat},{lon}:")
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument("--headless")  # Run in headless mode (optional)
-
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=chrome_options
-        )
-
-        def extract_info_from_url(input_str):
-            # Extract fid
-            data_index = input_str.find("data=")
-            data_str = input_str[data_index + len("data=") :]
-
-            end_index = data_str.find("!", 12)
-            fid = data_str[11:end_index]
-
-            # Extract coordinates
-            lat_start_index = data_str.find("!3d") + 3
-            lat_end_index = data_str.find("!", lat_start_index)
-            lat = data_str[lat_start_index:lat_end_index]
-
-            lon_start_index = data_str.find("!4d") + 3
-            lon_end_index = data_str.find("!", lon_start_index)
-            lon = data_str[lon_start_index:lon_end_index]
-
-            gps_coordinate = lat + "," + lon
-
-            return fid, gps_coordinate
-
-        try:
-            driver.get(url)
-
-            scrollable_div = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, 'div[aria-label="Results for Restaurants"]')
-                )
-            )
-
-            restaurants = {}
-            last_height = driver.execute_script(
-                "return arguments[0].scrollHeight", scrollable_div
-            )
-            start_time = time.time()
-
-            while True:
-
-                if time.time() - start_time > timeout:
-                    print(
-                        f"Timeout of {timeout} seconds reached. Returning current results."
-                    )
-                    break
-
-                # Scroll down to bottom
-                driver.execute_script(
-                    "arguments[0].scrollTo(0, arguments[0].scrollHeight);",
-                    scrollable_div,
-                )
-
-                # Wait to load page
-                try:
-                    WebDriverWait(driver, 10).until(
-                        lambda d: d.execute_script(
-                            "return arguments[0].scrollHeight", scrollable_div
-                        )
-                        > last_height
-                    )
-                except TimeoutException:
-                    print("No new content loaded. Assuming end of results.")
-                    break
-
-                # Calculate new scroll height and compare with last scroll height
-                new_height = driver.execute_script(
-                    "return arguments[0].scrollHeight", scrollable_div
-                )
-
-                # Get current restaurant entries
-                try:
-                    # Locate all parent divs that contain restaurant information
-                    restaurant_entries = scrollable_div.find_elements(
-                        By.CSS_SELECTOR, "div.Nv2PK.THOPZb.CpccDe"
-                    )
-
-                    for entry in restaurant_entries:
-                        try:
-                            # Find name and address within each entry
-                            name_element = entry.find_element(
-                                By.CSS_SELECTOR, ".qBF1Pd.fontHeadlineSmall"
-                            )
-                            address_container = entry.find_element(
-                                By.CSS_SELECTOR, "div.UaQhfb.fontBodyMedium"
-                            )
-                            address_element = address_container.find_element(
-                                By.XPATH, "./div[@class='W4Efsd'][2]/div/span[last()]"
-                            )
-
-                            url_str = entry.find_element(
-                                By.XPATH, "./a[@class='hfpxzc']"
-                            ).get_attribute("href")
-
-                            fid, gps_coordinate = extract_info_from_url(url_str)
-
-                            gps_list = gps_coordinate.split(",")
-
-                            # Convert to floating-point numbers
-                            lat = float(gps_list[0])
-                            lon = float(gps_list[1])
-
-                            if not self.is_point_in_quadrilateral(lat, lon):
-                                continue  # OUTSIDE OUR BOX
-
-                            name, address = None, None
-                            if name_element:
-                                name = name_element.text.strip()
-                            if address_element:
-                                address = address_element.text.strip()
-
-                            if fid not in restaurants:
-                                restaurants[fid] = {
-                                    "name": name,
-                                    "address": address,
-                                    "gps_coordinates": gps_coordinate,
-                                }
-
-                                print(
-                                    f"Update: Time {round(time.time() - start_time,2)}s. \tRestaurant Name: {name[:20]:<20}\tAddress: {address[:10]:<10}\tFID: {fid:<20}\tTotal Restaurants:{len(restaurants):>4}"
-                                )
-
-                        except Exception as e:
-                            # print(type(e).__name__, "Meeh don't worry ;)")
-                            continue
-                except StaleElementReferenceException:
-                    scrollable_div = driver.find_element(
-                        By.CSS_SELECTOR, 'div[aria-label="Results for Restaurants"]'
-                    )
-                    continue
-
-                # Check if "End of Results" message is visible
-                try:
-                    end_of_results = WebDriverWait(driver, 3).until(
-                        EC.presence_of_element_located(
-                            (By.XPATH, "//*[contains(text(), 'End of Results')]")
-                        )
-                    )
-                    if end_of_results.is_displayed():
-                        print("Reached end of results.")
-                        break
-                except TimeoutException:
-                    pass  # "End of Results" not found, continue scrolling
-
-                if new_height == last_height:
-                    print("Reached end of scroll.")
-                    break
-                last_height = new_height
-
-            return restaurants
-
-        finally:
-            driver.quit()
+            return fid, gps_coordinate, city_name, search_url
+        
 
     def load_progress(self, save_file):
         try:
@@ -635,58 +351,10 @@ class GoogleSpider(scrapy.Spider):
         with open(save_file, "w", encoding="utf-8") as file:
             json.dump(save_data, file, ensure_ascii=False)
 
-    def start_requests(self):
-
-        return
-
-        for fid in self.restaurant_details:
-            restaurant_detail = self.restaurant_details[fid]
-
-            restaurant_name = restaurant_detail["name"]
-            if fid not in self.scraping_progress:
-                self.scraping_progress[fid] = {
-                    "restaurant_name": restaurant_name,
-                    "status": "not_started",
-                    "next_page_token": "",
-                }
-
-            if self.scraping_progress[fid]["status"] != "completed":
-
-                gps_coordinate = restaurant_detail["gps_coordinates"]
-
-                next_page_token = self.scraping_progress[fid]["next_page_token"]
-                url = (
-                    "https://www.google.com/async/reviewDialog?async=feature_id:"
-                    + str(fid)
-                    + f",next_page_token:{next_page_token}"
-                    + ",_fmt:pc"
-                )
-
-                yield Request(
-                    url=url,  # THE URL CONTAINS THE NEXT PAGE TOKEN, NO NEED TO SEND IT VIA META
-                    headers=self.HEADERS,
-                    callback=self.parse_reviews,
-                    meta={
-                        "restaurant_name": restaurant_name,
-                        "feature_id": fid,
-                        "gps_coordinate": gps_coordinate,
-                    },
-                )
-
     def save_to_csv(self, file, row):
         file_exists = os.path.isfile(file)
         with open(file, "a", newline="", encoding="utf-8") as csvfile:
-            fieldnames = [
-                "Restaurant Name",
-                "GPS Coordinates",
-                "Reviewer",
-                "Reviewer ID",
-                "Num Reviews",
-                "Description",
-                "Rating",
-                "Review Date",
-                "Image Filename",
-            ]
+            fieldnames = row.keys()
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
             if not file_exists:
@@ -730,6 +398,45 @@ class GoogleSpider(scrapy.Spider):
 
         self.convert_png_to_webp(f"./images/{name}.png", f"./images/{name}.webp")
 
+    def start_requests(self):
+
+        return
+
+        for fid in self.restaurant_details:
+            restaurant_detail = self.restaurant_details[fid]
+
+            restaurant_name = restaurant_detail["restaurant_name"]
+            if fid not in self.scraping_progress:
+                self.scraping_progress[fid] = {
+                    "restaurant_name": restaurant_name,
+                    "status": "not_started",
+                    "next_page_token": "",
+                    "images_left_to_download": NUM_IMGS_TO_DOWNLOAD
+                }
+
+            if self.scraping_progress[fid]["status"] != "completed":
+
+                next_page_token = self.scraping_progress[fid]["next_page_token"]
+                url = (
+                    "https://www.google.com/async/reviewDialog?async=feature_id:"
+                    + str(fid)
+                    + f",next_page_token:{next_page_token}"
+                    + ",_fmt:pc"
+                )
+
+                images_left_to_download = self.scraping_progress[fid]["images_left_to_download"]
+
+                yield Request(
+                    url=url,  # THE URL CONTAINS THE NEXT PAGE TOKEN, NO NEED TO SEND IT VIA META
+                    headers=self.HEADERS,
+                    callback=self.parse_reviews,
+                    meta={
+                        "feature_id":fid,
+                        "restaurant_detail": restaurant_detail,
+                        "images_left_to_download":images_left_to_download
+                    },
+                )
+
     def parse_reviews(self, response):
         """Parses the response object from a previous request, loads first 10 reviews, saves the data for the ones that have images with them in a csv. Finally it detects the next_page_token and then recursively calls itself for the next 10 entries.
         Args
@@ -739,11 +446,19 @@ class GoogleSpider(scrapy.Spider):
 
         """
 
-        restaurant_name = response.meta["restaurant_name"]
-        gps_coordinate = response.meta["gps_coordinate"]
+        restaurant_detail = response.meta["restaurant_detail"]
+
+        restaurant_name = restaurant_detail["restaurant_name"]
+        country_name = restaurant_detail["country_name"]
+        city_name = restaurant_detail["city_name"]
+        gps_coordinate = restaurant_detail["gps_coordinate"]
         feature_id = response.meta["feature_id"]
+        images_left_to_download = response.meta["images_left_to_download"]
 
         all_reviews = response.xpath('//*[@id="reviewSort"]/div/div[2]/div')
+
+        if images_left_to_download == 0:
+            return
 
         # WRITE CSV OF 10 REVIEWS
         review_i = 0
@@ -828,9 +543,12 @@ class GoogleSpider(scrapy.Spider):
             url_pattern = re.compile(r"url\((.*?)\)")
 
             image_i = 0
-            image_names_str = ""
+            # image_names_str = ""
             for review_img_div in review_imgs_div:
                 image_i += 1
+
+                if image_i>MAX_NUM_IMGS_PER_USER:
+                    break
                 style_str = review_img_div.xpath("@style").extract_first()
 
                 # FIND THE URL
@@ -838,27 +556,34 @@ class GoogleSpider(scrapy.Spider):
                 url = re.sub(r"=w100-h100-p-n-k-no", "", url)
                 url += "=s2000-no"  # THIS MAKES THE IMAGE 2000x2000
 
-                image_name = self.generate_unique_filename()
-                image_names_str += "," + image_name
+                image_name = f"{restaurant_name}_{reviewer}_{image_i}"
+                # image_names_str += "," + image_name
 
                 """DOWNLOAD"""
                 # self.download_image(image_name, url)
 
-            image_names_str = image_names_str[1:]  # DROP THE COMMA
+                images_left_to_download -= 1
+                if images_left_to_download == 0:
+                    break
 
-            if image_i > 0:
+            # image_names_str = image_names_str[1:]  # DROP THE COMMA
+
+            # if image_i > 0:
                 # A SEPERATE LINE FOR EACH REVIEWER
 
                 data_row = {
-                    "Restaurant Name": restaurant_name,
-                    "GPS Coordinates": gps_coordinate,
-                    "Reviewer": reviewer,
-                    "Reviewer ID": reviewer_id,
-                    "Num Reviews": num_reviews,
-                    "Description": description,
-                    "Rating": review_rating,
-                    "Review Date": review_date,
-                    "Image Filename": image_names_str,
+                    "country_name":country_name,
+                    "city_name":city_name,
+                    "restaurant_name": restaurant_name,
+                    "feature_id":feature_id,
+                    "gps_coordinates": gps_coordinate,
+                    "reviewer": reviewer,
+                    "reviewer_id": reviewer_id,
+                    "num_reviews": num_reviews,
+                    "description": description,
+                    "review_rating": review_rating,
+                    "review_date": review_date,
+                    "image_name": image_name,
                 }
                 self.save_to_csv(self.scrape_data_file, data_row)
 
@@ -874,7 +599,7 @@ class GoogleSpider(scrapy.Spider):
             response.request.url.split(",next_page_token:")[0]
             + f",next_page_token:{next_page_token},_fmt:pc"
         )
-        print("NEXT URL!\n\n\n", next_url, "NEXT URL!\n\n\n")
+        # print("NEXT URL!\n\n\n", next_url, "NEXT URL!\n\n\n")
 
         ##########################
         # LOG YOUR CURRENT PROGRESS SO THAT YOU CAN PICK UP FROM HERE LATER
@@ -884,24 +609,30 @@ class GoogleSpider(scrapy.Spider):
         else:
             self.scraping_progress[feature_id]["status"] = "in_progress"
 
+        self.scraping_progress[feature_id]["images_left_to_download"] = images_left_to_download
+
         self.save_progress(self.scraping_progress_file, self.scraping_progress)
 
         if next_page_token != "":
-            # SEND REQUEST TO LOAD THE NEXT 10 REVIEWS
-            yield Request(
-                url=next_url,
-                headers=self.HEADERS,
-                callback=self.parse_reviews,
-                dont_filter=True,
-                meta={
-                    "restaurant_name": restaurant_name,
-                    "feature_id": feature_id,
-                    "gps_coordinate": gps_coordinate,
-                },
+            if images_left_to_download != 0:
+
+                # SEND REQUEST TO LOAD THE NEXT 10 REVIEWS
+                yield Request(
+                    url=next_url,
+                    headers=self.HEADERS,
+                    callback=self.parse_reviews,
+                    dont_filter=True,
+                    meta={
+                        "feature_id":feature_id,
+                        "restaurant_detail": restaurant_detail,
+                        "images_left_to_download":images_left_to_download
+                    },
             )
 
 
 spider = GoogleSpider()
-spider.scrape_restaurant_details_from_random_users(num_users=500)
+# spider.scrape_restaurant_details_from_random_users(num_users=500)
 # spider.scrape_restaurant_details()
 # spider.save_restaurant_details_from_names()
+
+spider.scrape_restaurant_names_from_country(COUNTRIES)
