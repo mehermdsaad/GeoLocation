@@ -38,7 +38,7 @@ NUM_RESTAURANTS_PER_COUNTRY = 50
 MAX_NUM_CITIES_PER_COUNTRY = 10
 MAX_NUM_RESTAURANTS_PER_CITY = 20
 NUM_REVIEWS_THRESHHOLD = 500
-NUM_IMGS_TO_DOWNLOAD = 100
+NUM_IMGS_TO_DOWNLOAD =75
 MAX_NUM_IMGS_PER_USER = 5
 
 class GoogleSpider(scrapy.Spider):
@@ -337,7 +337,6 @@ class GoogleSpider(scrapy.Spider):
 
             return fid, gps_coordinate, city_name, search_url
         
-
     def load_progress(self, save_file):
         try:
             if os.path.getsize(save_file) == 0:
@@ -393,14 +392,17 @@ class GoogleSpider(scrapy.Spider):
 
     def download_image(self, name, url):
         response = requests.get(url, stream=True)
+
+        if not os.path.exists("./images"):
+            os.makedirs("./images")
         with open(f"./images/{name}.png", "wb") as out_file:
             shutil.copyfileobj(response.raw, out_file)
 
-        self.convert_png_to_webp(f"./images/{name}.png", f"./images/{name}.webp")
+        # self.convert_png_to_webp(f"./images/{name}.png", f"./images/{name}.webp")
 
     def start_requests(self):
 
-        return
+        # return
 
         for fid in self.restaurant_details:
             restaurant_detail = self.restaurant_details[fid]
@@ -414,6 +416,9 @@ class GoogleSpider(scrapy.Spider):
                     "images_left_to_download": NUM_IMGS_TO_DOWNLOAD
                 }
 
+            if self.scraping_progress[fid]["images_left_to_download"]==0:
+                continue
+            
             if self.scraping_progress[fid]["status"] != "completed":
 
                 next_page_token = self.scraping_progress[fid]["next_page_token"]
@@ -451,7 +456,7 @@ class GoogleSpider(scrapy.Spider):
         restaurant_name = restaurant_detail["restaurant_name"]
         country_name = restaurant_detail["country_name"]
         city_name = restaurant_detail["city_name"]
-        gps_coordinate = restaurant_detail["gps_coordinate"]
+        gps_coordinate = restaurant_detail["gps_coordinates"]
         feature_id = response.meta["feature_id"]
         images_left_to_download = response.meta["images_left_to_download"]
 
@@ -560,16 +565,7 @@ class GoogleSpider(scrapy.Spider):
                 # image_names_str += "," + image_name
 
                 """DOWNLOAD"""
-                # self.download_image(image_name, url)
-
-                images_left_to_download -= 1
-                if images_left_to_download == 0:
-                    break
-
-            # image_names_str = image_names_str[1:]  # DROP THE COMMA
-
-            # if image_i > 0:
-                # A SEPERATE LINE FOR EACH REVIEWER
+                self.download_image(image_name, url)
 
                 data_row = {
                     "country_name":country_name,
@@ -587,7 +583,13 @@ class GoogleSpider(scrapy.Spider):
                 }
                 self.save_to_csv(self.scrape_data_file, data_row)
 
+                images_left_to_download -= 1
+                if images_left_to_download == 0:
+                    break
+
             review_i += 1
+            if images_left_to_download == 0:
+                break
 
         # FIND NEXT PAGE TOKEN
         next_page_token_div = response.xpath('//*[@id="reviewSort"]/div/div[2]')
@@ -614,7 +616,7 @@ class GoogleSpider(scrapy.Spider):
         self.save_progress(self.scraping_progress_file, self.scraping_progress)
 
         if next_page_token != "":
-            if images_left_to_download != 0:
+            if images_left_to_download > 0:
 
                 # SEND REQUEST TO LOAD THE NEXT 10 REVIEWS
                 yield Request(
@@ -630,9 +632,9 @@ class GoogleSpider(scrapy.Spider):
             )
 
 
-spider = GoogleSpider()
+# spider = GoogleSpider()
 # spider.scrape_restaurant_details_from_random_users(num_users=500)
 # spider.scrape_restaurant_details()
 # spider.save_restaurant_details_from_names()
 
-spider.scrape_restaurant_names_from_country(COUNTRIES)
+# spider.scrape_restaurant_names_from_country(COUNTRIES)

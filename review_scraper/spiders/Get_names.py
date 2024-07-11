@@ -203,4 +203,4 @@ def get_names_by_scrolling():
 ##      google.py to save progress to json file.
 
 # scrape_restaurant_guru()
-get_names_by_scrolling()
+# get_names_by_scrolling()
