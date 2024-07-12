@@ -38,8 +38,8 @@ NUM_RESTAURANTS_PER_COUNTRY = 50
 MAX_NUM_CITIES_PER_COUNTRY = 10
 MAX_NUM_RESTAURANTS_PER_CITY = 20
 NUM_REVIEWS_THRESHHOLD = 500
-NUM_IMGS_TO_DOWNLOAD =75
-MAX_NUM_IMGS_PER_USER = 5
+NUM_IMGS_TO_DOWNLOAD =30
+MAX_NUM_IMGS_PER_USER = 3
 
 class GoogleSpider(scrapy.Spider):
 
@@ -457,6 +457,13 @@ class GoogleSpider(scrapy.Spider):
         country_name = restaurant_detail["country_name"]
         city_name = restaurant_detail["city_name"]
         gps_coordinate = restaurant_detail["gps_coordinates"]
+        
+        lat, lon = gps_coordinate.split(',')
+
+        # Convert to float for numerical operations
+        lat = float(lat)
+        lon = float(lon)
+
         feature_id = response.meta["feature_id"]
         images_left_to_download = response.meta["images_left_to_download"]
 
@@ -518,7 +525,7 @@ class GoogleSpider(scrapy.Spider):
                         nested_a.decompose()
 
                     for br in soupDescription.find_all("br"):
-                        br.replace_with("\n")  # CHANGE <br> TAGS TO "\n"
+                        br.replace_with(" ")  # CHANGE <br> TAGS TO "\n"
 
                 description = soupDescription.get_text(separator="")
 
@@ -526,7 +533,9 @@ class GoogleSpider(scrapy.Spider):
                     description = ""
             else:
                 soup = BeautifulSoup(description, "html.parser")
-                description = soup.get_text(separator="\n")  # CHANGE <br> TAGS TO "\n"
+                description = soup.get_text(separator=" ")  # CHANGE <br> TAGS TO "\n"
+            
+            description = description.replace("\n"," ")
 
             # GET REVIEW RATING
             # NOTE: ACTIVATE NYU VPN PLEASE, THE ARABIC LOCATION ISN'T HELPFUL FOR SCRAPING
@@ -559,9 +568,10 @@ class GoogleSpider(scrapy.Spider):
                 # FIND THE URL
                 url = url_pattern.search(style_str).group(1)
                 url = re.sub(r"=w100-h100-p-n-k-no", "", url)
-                url += "=s2000-no"  # THIS MAKES THE IMAGE 2000x2000
+                url += "=s1000-no"  # THIS MAKES THE IMAGE MIN_DIM 1000
 
-                image_name = f"{restaurant_name}_{reviewer}_{image_i}"
+                feature_id_str = feature_id.replace(":","_")
+                image_name = f"{feature_id_str}_{reviewer_id}_{image_i}"
                 # image_names_str += "," + image_name
 
                 """DOWNLOAD"""
@@ -572,7 +582,8 @@ class GoogleSpider(scrapy.Spider):
                     "city_name":city_name,
                     "restaurant_name": restaurant_name,
                     "feature_id":feature_id,
-                    "gps_coordinates": gps_coordinate,
+                    "lat": lat,
+                    "lon": lon,
                     "reviewer": reviewer,
                     "reviewer_id": reviewer_id,
                     "num_reviews": num_reviews,
