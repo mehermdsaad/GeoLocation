@@ -27,12 +27,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
+# LOGS AND OUTPUT FILES
 scraping_progress_file = "./logs/scraping_log.json"
 users_log_file = "./logs/users_log.json"
 restaurant_details_file = "./data/restaurant_details.json"
 restaurant_names_file = "./data/restaurant_names.json"
 scrape_data_file = "./reviews.csv"
 
+# CONSTRAINTS
 COUNTRIES = ["Saudi Arabia","United Arab Emirates","Lebanon","Egypt","Qatar"]
 NUM_RESTAURANTS_PER_COUNTRY = 50
 MAX_NUM_CITIES_PER_COUNTRY = 10
@@ -70,6 +72,16 @@ class GoogleSpider(scrapy.Spider):
         self.scrape_data_file = scrape_data_file
 
     def scrape_restaurant_names_from_country(self,countries):
+        """Searches in restaurantguru.com for contries in the list provided and looks for NUM_RESTAURANTS_PER_COUNTRY number of restaurants sorted by highest rating such that there are 
+        atmost MAX_NUM_CITIES_PER_COUNTRY number of cities for each country, and atmost MAX_NUM_RESTAURANTS_PER_CITY number of restaurants per city. The restaurants have a constraint of
+        having atleast NUM_REVIEWS_THRESHHOLD number of reviews to begin with.
+        
+        Outcome
+        -------
+        Saves the list of restaurants in the './data/restaurant_details.json' file
+
+        NOTE: USER might need to manually add/remove restaurants based on other issues like lack of variety
+        """
 
         for country_name in countries:
             country_search = country_name.replace(" ", "-")
@@ -162,7 +174,6 @@ class GoogleSpider(scrapy.Spider):
                                         if "permanently closed" in closed_or_not.lower():
                                             continue
                                 except Exception as e:
-                                    # print(f"[JUST PASSING],{e}")
                                     pass
                                 
 
@@ -247,12 +258,16 @@ class GoogleSpider(scrapy.Spider):
 
     def get_review_page_fid_gps_from_name(self, restaurant_name, city_name="", country_name=""):
         """
-        Searches for the restaurant name and returns the feature_id and gps_coordinates of the reviews page.
-        This method uses requests and BeautifulSoup instead of Selenium for faster performance.
+        Searches for the restaurant name along with a combination of city_name, country_name and if the google reviews box exists, returns the feature_id and gps_coordinates of the reviews page.
+
+        Args
+        ------
+        city_name is optional, when not present, it will pick up the city name from the address in the google reviews box.
+        country_name: also optional, but encouraged to pass here.
 
         Returns
         ------
-        fid, gps_coordinate : feature_id of the reviews page, gps_coordinate: a str of format "lat,lon"
+        fid, gps_coordinate, city_name, search_url : feature_id of the reviews page, gps_coordinate: a str of format "lat,lon", city_name: returns the name of the city to cross check, search_url: the search url that was successful in locating the google reviews box
         """
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -274,6 +289,7 @@ class GoogleSpider(scrapy.Spider):
 
             response = requests.get(search_url, headers=self.HEADERS)
 
+            # SOMETIMES THE RATE OF REQUESTS EXCEED THE LIMIT. WAITING IS BETTER IN THAT SCENARIO
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 60))
                 print(f"Rate limit exceeded. Waiting for {retry_after} seconds")
@@ -338,6 +354,7 @@ class GoogleSpider(scrapy.Spider):
             return fid, gps_coordinate, city_name, search_url
         
     def load_progress(self, save_file):
+        """Helper method to read a dict from a json file. Currently used for ./data/restaurant_details.json and ./logs/scraping_logs.json."""
         try:
             if os.path.getsize(save_file) == 0:
                 return {}
@@ -347,10 +364,17 @@ class GoogleSpider(scrapy.Spider):
             return {}
 
     def save_progress(self, save_file, save_data):
+        """Helper method to save logs for saving progress. Dumps a dictionary holding logging information to a json file. Currently used for ./data/restaurant_details.json and ./logs/scraping_logs.json."""
         with open(save_file, "w", encoding="utf-8") as file:
             json.dump(save_data, file, ensure_ascii=False)
 
     def save_to_csv(self, file, row):
+        """Helper method to append a row into the output csv. By default it is "./reviews.csv".
+        Args:
+        --------
+        save_file: file path, str
+        row: dict containing header, value
+        """
         file_exists = os.path.isfile(file)
         with open(file, "a", newline="", encoding="utf-8") as csvfile:
             fieldnames = row.keys()
@@ -361,7 +385,7 @@ class GoogleSpider(scrapy.Spider):
             writer.writerow(row)
 
     def generate_unique_filename(self):
-        """Helper Method to generate unique filenames
+        """Helper Method to generate unique filenames. Obsolete in this version of the code
         Returns
         ----
         name: A 15-byte random hexadecimal string"""
@@ -374,11 +398,7 @@ class GoogleSpider(scrapy.Spider):
 
     def convert_png_to_webp(self, input_path, output_path, quality=80):
         """
-        Convert a PNG image to WebP format.
-
-        :param input_path: Path to the input PNG file
-        :param output_path: Path to save the output WebP file
-        :param quality: Quality of the output WebP image (0-100, default 80)
+        Convert a PNG image to WebP format. Not employed in this version of the code
         """
         try:
             # Open the PNG image
@@ -391,6 +411,8 @@ class GoogleSpider(scrapy.Spider):
             print(f"Error converting {input_path}: {str(e)}")
 
     def download_image(self, name, url):
+        """Helper method to download images from a url
+        """
         response = requests.get(url, stream=True)
 
         if not os.path.exists("./images"):
@@ -401,8 +423,10 @@ class GoogleSpider(scrapy.Spider):
         # self.convert_png_to_webp(f"./images/{name}.png", f"./images/{name}.webp")
 
     def start_requests(self):
-
-        # return
+        """Default method called by scrapy. Use 'scrapy crawl google' command to start scraping. Loads the restaurant details form restaurant_details.json file and starts scraping for 
+        reviews with images. Scraping is currently subject to constraints. At most NUM_IMAGES_PER_USER number of images (by default 3) are gathered and then it moves on to the next user. 
+        Gathers NUM_IMGS_TO_DOWNLOAD number of images for each restaurant (by default 30)"""
+    
 
         for fid in self.restaurant_details:
             restaurant_detail = self.restaurant_details[fid]
@@ -443,11 +467,16 @@ class GoogleSpider(scrapy.Spider):
                 )
 
     def parse_reviews(self, response):
-        """Parses the response object from a previous request, loads first 10 reviews, saves the data for the ones that have images with them in a csv. Finally it detects the next_page_token and then recursively calls itself for the next 10 entries.
+        """Parses the response object from a previous request, loads first 10 reviews, saves the data for the ones that have images with them in a csv. Finally it detects the 
+        next_page_token and then recursively calls itself for the next 10 entries. Currently it keeps going until it gathers all NUM_IMGS_TO_DOWNLOAD number of images per restaurant.
+
         Args
         --------
         response - the Response object from a Request
 
+        Calls
+        --------
+        save_to_csv method for each image
 
         """
 
@@ -477,6 +506,7 @@ class GoogleSpider(scrapy.Spider):
         for review in all_reviews:
             # REVIEWER NAME
             reviewer = review.css("div.TSUbDb a::text").extract_first()
+            reviewer = reviewer.replace(",","")
 
             reviewer_id = review.xpath(
                 "substring-before(substring-after(.//div[@class='TSUbDb']/a[contains(@href, '/maps/contrib/')]/@href, '/contrib/'), '?')"
@@ -643,9 +673,8 @@ class GoogleSpider(scrapy.Spider):
             )
 
 
+# # UNCOMMENT AND RUN THIS IN ORDER TO SCRAPE FOR RESTAURANT DETAILS FROM restaurantguru.com AND google reviews
+
 # spider = GoogleSpider()
-# spider.scrape_restaurant_details_from_random_users(num_users=500)
-# spider.scrape_restaurant_details()
-# spider.save_restaurant_details_from_names()
 
 # spider.scrape_restaurant_names_from_country(COUNTRIES)
