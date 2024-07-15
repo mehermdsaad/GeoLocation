@@ -57,6 +57,9 @@ class GoogleSpider(scrapy.Spider):
         self.scrape_data_file = scrape_data_file
 
     def scrape_restaurant_details_from_random_users(self, num_users=50,random_seed=None):
+        """Method to get restaurant details by checking randomly chosen {num_users} number of users (based on a p-distribution which gives priority to users with the most reviews).
+        Maintains users_log.json to not repeat checking the same user for the second time. Surprisingly effective at discovering new restaurant names"""
+
         if random_seed is not None:
             np.random.seed(random_seed)
 
@@ -120,6 +123,8 @@ class GoogleSpider(scrapy.Spider):
         )
 
     def scrape_restaurant_details_per_user(self, user_id, username="USER", timeout=300):
+        """Gets the restaurant detail for each user. Currently only gets the ones based on Abu Dhabi"""
+
         url = f"https://www.google.com/maps/contrib/{user_id}/reviews?entry=ttu"
 
         chrome_options = webdriver.ChromeOptions()
@@ -261,8 +266,9 @@ class GoogleSpider(scrapy.Spider):
 
     def get_review_page_fid_gps_from_name(self, name, address=""):
         """
-        Searches for the restaurant name and returns the feature_id and gps_coordinates of the reviews page.
-        This method uses requests and BeautifulSoup instead of Selenium for faster performance.
+        Searches for the restaurant name and returns the feature_id and gps_coordinates of the reviews page. 
+        Additionally check if the place is a restaurant or not by keyword checks
+
 
         Returns
         ------
@@ -365,9 +371,8 @@ class GoogleSpider(scrapy.Spider):
 
     def save_restaurant_details_from_names(self):
         """Helper method to get feature_ids and gps_coordinates from restaurant_names. Takes a list of restaurant names.
-        Returns the lists feature_id,gps_coordinates
-        -- NOTE: This makes use of Selenium, so captcha might be an issue
-        -- NOTE: Might need to implement a log system for getting the fid,gps since captcha and other stuff might be a hurdle
+        saves newly found restaurants in the restaurant_details.json file
+
         """
 
         for name, address in self.restaurant_names.items():
@@ -384,6 +389,8 @@ class GoogleSpider(scrapy.Spider):
         self.save_progress(self.restaurant_details_file, self.restaurant_details)
 
     def is_point_in_quadrilateral(self, lat, lon):
+        """ Helper method for sanity checks, checking if a gps coordinate is inside Abu Dhabi or not
+        """
         vertices = [
             (24.441665, 54.257385),
             (24.061811, 54.665366),
@@ -409,6 +416,8 @@ class GoogleSpider(scrapy.Spider):
         return wn != 0
 
     def generate_points_in_quadrilateral(self, vertices, num_points=4):
+        """Helper method to uniformly generate {num_points} number of points inside a quadrilateral region.
+        """
         (x1, y1) = vertices[0]
         (x2, y2) = vertices[1]
         (x3, y3) = vertices[2]
@@ -429,6 +438,9 @@ class GoogleSpider(scrapy.Spider):
         return list(zip(x, y))
 
     def scrape_restaurant_details(self, timeout=300, num_points=400):
+        """ Generates 400 equally spaced points inside Abu Dhabi. Does a 'restaurants near me' search to get list of restaurants for all 400 points.
+        NOTE: Was able to gather 1650 unique restaurants in Abu Dhabi through this method. 
+        """
         # COMPLETE
         vertices = [
             (24.459788, 54.314777),
@@ -459,6 +471,8 @@ class GoogleSpider(scrapy.Spider):
     def scrape_restaurant_details_at_gps(
         self, lat=24.5264811, lon=54.4092652, timeout=300
     ):
+        """Individual function to search for restaurants around a certain gps. Returns a dict of newfound restaurants
+        """
         url = (
             f"https://www.google.com/maps/search/Restaurants/@{lat},{lon},15z?entry=ttu"
         )
@@ -623,6 +637,7 @@ class GoogleSpider(scrapy.Spider):
             driver.quit()
 
     def load_progress(self, save_file):
+        """Helper method to load progress files into dicts"""
         try:
             if os.path.getsize(save_file) == 0:
                 return {}
@@ -632,12 +647,14 @@ class GoogleSpider(scrapy.Spider):
             return {}
 
     def save_progress(self, save_file, save_data):
+        """Helper method to dump dicts into json files"""
         with open(save_file, "w", encoding="utf-8") as file:
             json.dump(save_data, file, ensure_ascii=False)
 
     def start_requests(self):
-
-        return
+        """Scrapy default method to call for scraping restaurant reviews. Utilizes data from the restaurant_details.json file for this."""
+        
+        return # CURRENTLY DISABLED TO ONLY GATHER ENOUGH RETAURANT NAMES
 
         for fid in self.restaurant_details:
             restaurant_detail = self.restaurant_details[fid]
