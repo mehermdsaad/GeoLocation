@@ -1,4 +1,4 @@
-#!/home/yasir/GeoLocation/Scraper-main/review_scraper/spiders/scraperenv/bin/python3
+#!/home/yasir/GeoLocation/GeoLocation-main/review_scraper/spiders/scraperenv/bin/python3
 
 import sys
 import json

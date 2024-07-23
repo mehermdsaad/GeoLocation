@@ -38,7 +38,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="/home/yasir/GeoLocation/Scraper-main/review_scraper/spiders/scraperenv"
+VIRTUAL_ENV="/home/yasir/GeoLocation/GeoLocation-main/review_scraper/spiders/scraperenv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"
