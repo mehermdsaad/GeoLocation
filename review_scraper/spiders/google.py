@@ -1,47 +1,43 @@
-import binascii
 import csv
 import json
 import os
-import random
 import re
 import shutil
 import time
+
 from urllib.parse import quote_plus
 
-import pandas as pd
 import numpy as np
+from PIL import Image
+
 import requests
 import scrapy
-from bs4 import BeautifulSoup
-from PIL import Image
 from scrapy.http.request import Request
+
+from bs4 import BeautifulSoup
+
 from selenium import webdriver
-from selenium.common.exceptions import (
-    NoSuchElementException,
-    StaleElementReferenceException,
-    TimeoutException,
-)
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 # LOGS AND OUTPUT FILES
-scraping_progress_file = "./logs/scraping_log.json"
-users_log_file = "./logs/users_log.json"
-restaurant_details_file = "./data/restaurant_details.json"
-restaurant_names_file = "./data/restaurant_names.json"
-scrape_data_file = "./reviews.csv"
+scraping_progress_file = "./logs/scraping_log_eu.json" # REPLACE THE _eu WITH _ar TO SAVE TO THE ARAB COUNTRIES' LOG
+restaurant_details_file = "./data/restaurant_details_eu.json"
+scrape_data_file = "./reviews_eu.csv"
 
 # CONSTRAINTS
-COUNTRIES = ["Saudi Arabia","United Arab Emirates","Lebanon","Egypt","Qatar"]
-NUM_RESTAURANTS_PER_COUNTRY = 50
-MAX_NUM_CITIES_PER_COUNTRY = 10
-MAX_NUM_RESTAURANTS_PER_CITY = 20
-NUM_REVIEWS_THRESHHOLD = 500
-NUM_IMGS_TO_DOWNLOAD =30
-MAX_NUM_IMGS_PER_USER = 3
+# COUNTRIES = ["Saudi Arabia","United Arab Emirates","Lebanon","Egypt","Qatar"] # THE ARAB COUNTRIES
+COUNTRIES = ["Germany","United Kingdom","Italy","Spain","France"] # THE EU COUNTRIES
+
+NUM_RESTAURANTS_PER_COUNTRY = 400 # GET 400 RESTAURANTS PER COUNTRY
+NUM_REVIEWS_THRESHHOLD = 350 # RESTAURANTS ARE PICKED ONLY IF THEIR TOTAL NUMBER OF REVIEWS EXCEED 350
+NUM_IMGS_TO_DOWNLOAD = 25 # PER RESTAURANT 25 IMAGES ARE DOWNLOADED
+MAX_NUM_IMGS_PER_USER = 5 # MAX NUMBER OF IMAGES SCRAPED FROM A SINGLE USER PER RESTAURANT
+
+CITY_RESTAURANT_CNT_THRESHHOLD = 200 # DONT INCLUDE THE CITIES WHICH HAVE LESS THAN 200 RESTUARANTS LISTED ON THE WEBSITE
 
 class GoogleSpider(scrapy.Spider):
 
@@ -64,32 +60,200 @@ class GoogleSpider(scrapy.Spider):
         self.scraping_progress = self.load_progress(self.scraping_progress_file)
         self.restaurant_details_file = restaurant_details_file
         self.restaurant_details = self.load_progress(self.restaurant_details_file)
-        self.restaurant_names_file = restaurant_names_file
-        self.restaurant_names = self.load_progress(self.restaurant_names_file)
-        self.users_log_file = users_log_file
-        self.users_log = self.load_progress(self.users_log_file)
 
         self.scrape_data_file = scrape_data_file
 
-    def scrape_restaurant_names_from_country(self,countries):
-        """Searches in restaurantguru.com for contries in the list provided and looks for NUM_RESTAURANTS_PER_COUNTRY number of restaurants sorted by highest rating such that there are 
-        atmost MAX_NUM_CITIES_PER_COUNTRY number of cities for each country, and atmost MAX_NUM_RESTAURANTS_PER_CITY number of restaurants per city. The restaurants have a constraint of
-        having atleast NUM_REVIEWS_THRESHHOLD number of reviews to begin with.
-        
-        Outcome
-        -------
-        Saves the list of restaurants in the './data/restaurant_details.json' file
+    def scrape_restaurant_names_from_countries(self,countries):
+        """
+        Method to collect {NUM_RESTAURANTS_PER_COUNTRY} number of restaurants per country. We already have cities and number of restaurants that are listed in those cities. We use it as weights to get the proportionate number of restaurants per city. This tries to ensure an even distribution across the country.
 
-        NOTE: USER might need to manually add/remove restaurants based on other issues like lack of variety
+        Further criterias include the fact that the restaurant must have atleast 350 reviews.
+
+        Saves the restaurant names and details (feature_id, county_name, city_name, coordinates) in the self.restaurant_details_file in a json format. Used in the future for scraping from these restaurants' reviews
         """
 
+        self.restaurant_details = self.load_progress(self.restaurant_details_file)
+
+        # IF NO RESTAURANT RECORDS ARE ADDED, CREATE AN EMPTY CONTAINER
+        if not self.restaurant_details.get('restaurants',None):
+            self.restaurant_details['restaurants'] = {}
+
         for country_name in countries:
+
+            print(country_name,"\n")
+            cities_dict = self.restaurant_details['countries'][country_name]['cities']
+
+            country_restaurant_count = self.restaurant_details['countries'][country_name]['country_restaurant_count']
+            sampled_restaurant_count_country = self.restaurant_details['countries'][country_name].get("sampled_restaurant_count_country",0)
+
+            # THIS IS TO BE USED WHEN YOU ARE DONE SCRAPING AND STILL CANNOT GET 400 RESTAURANTS THROUGHOUT THE COUNTRY THAT MEET YOUR CRITERIA: AS IN QATAR, LEBANON
+            remaining_restaurant_count_country = NUM_RESTAURANTS_PER_COUNTRY - sampled_restaurant_count_country
+            # OTHERWISE THIS IS THE DEFAULT CODE
+            remaining_restaurant_count_country = NUM_RESTAURANTS_PER_COUNTRY
+
+            #IF WE ALREADY HAVE ENOUGH RESTAURANTS, MOVE ON TO THE NEXT COUNTRY
+            if sampled_restaurant_count_country >= NUM_RESTAURANTS_PER_COUNTRY:
+                continue
+
+            
+            for city_name, city_detail in cities_dict.items():
+                url = city_detail['url']+"#restaurant-list"
+
+                chrome_options = webdriver.ChromeOptions()
+                chrome_options.add_argument("--headless")  # Run in headless mode (optional)
+
+                driver = webdriver.Chrome(
+                    service=Service(ChromeDriverManager().install()), options=chrome_options
+                )
+
+                load_last_item_count = city_detail.get("last_item_count",0) # START WHERE WE LEFT OFF IN THE CITY PAGE IN RESTAURANT GURU
+
+                # city_detail["sampled_restaurant_count_city"] = 0 # IF WE WANT TO START OVER
+                sampled_restaurant_count_city = city_detail.get("sampled_restaurant_count_city",0)
+                city_restaurant_count = city_detail["city_restaurant_count"]
+
+                remaining_restaurant_count_city = int(np.ceil(remaining_restaurant_count_country * city_restaurant_count / country_restaurant_count)) - sampled_restaurant_count_city
+                # CALCULATE HOW MANY RESTAURANTS NEED TO BE SCRAPED PER CITY BASED ON HOW MANY RESTAURANTS IT HAS COMPARED TO THE COUNTRY_TOTAL
+
+                print(f"City: {city_name} Target Number of Restaurants:{int(np.ceil(remaining_restaurant_count_country * city_restaurant_count / country_restaurant_count))}. Remaining Restaurants: {remaining_restaurant_count_city}")
+                
+                # MORE CHECKS FOR COMPLETION OF COLLECTION
+                if self.restaurant_details['countries'][country_name].get("sampled_restaurant_count_country",0) >= NUM_RESTAURANTS_PER_COUNTRY:
+                    continue
+                elif remaining_restaurant_count_city <=0:
+                    continue
+
+                try:
+                    # FETCH THE CITY PAGE
+                    driver.get(url)
+
+                    last_item_count = 0
+                    city_restaurant_cnt = 0
+
+                    while True:
+                        
+                        driver.execute_script("window.scrollTo(0,document.body.scrollHeight);")
+
+                        try:
+                            # Wait for new items to load
+                            WebDriverWait(driver, 5).until(
+                                lambda d: len(
+                                    d.find_elements(
+                                        By.CSS_SELECTOR,
+                                        "div.wrapper_info",
+                                    )
+                                )
+                                > last_item_count
+                            )
+
+                            # GET ALL ITEMS
+                            items = driver.find_elements(
+                                By.CSS_SELECTOR, "div.wrapper_info"
+                            )
+                            # PROCESS ONLY THE NEW ONES
+                            if len(items)<load_last_item_count:
+                                last_item_count = len(items)
+                                print("Previously checked items, please wait ",last_item_count)
+                                continue
+                            
+                            for item in items[last_item_count:]:
+                                try:
+                                    if city_restaurant_cnt>=remaining_restaurant_count_city:
+                                        break
+
+                                    name_element = item.find_element(
+                                        By.CSS_SELECTOR, "a.notranslate.title_url"
+                                    )
+                                    restaurant_name = name_element.text
+                                    restaurant_name = restaurant_name.replace(",","-")
+                                    restaurant_url = name_element.get_attribute('href')
+                                    
+                                    try:
+                                        closed_or_not = item.find_element(
+                                            By.CSS_SELECTOR, "div.closed_info_block"
+                                        )
+                                        if closed_or_not:
+                                            closed_or_not = closed_or_not.text
+                                            if "permanently closed" in closed_or_not.lower():
+                                                continue
+                                    except Exception as e:
+                                        pass
+                                    
+
+                                    
+                                        
+                                    fid,gps_coordinate,city_name_google,search_url = self.get_review_page_fid_gps_from_name(restaurant_name,city_name=city_name,country_name=country_name)
+
+                                    if not fid or not gps_coordinate or not city_name:
+                                        continue
+                                    
+
+                                    if not self.restaurant_details['restaurants'].get(fid,None):
+                                        self.restaurant_details['restaurants'][fid] = {"restaurant_name":restaurant_name,"city_name":city_name,"country_name":country_name,"url":search_url,"gps_coordinates":gps_coordinate}
+                                        city_detail['sampled_restaurant_count_city'] = city_detail.get('sampled_restaurant_count_city',0) + 1
+                                        self.restaurant_details['countries'][country_name]["sampled_restaurant_count_country"] = self.restaurant_details['countries'][country_name].get("sampled_restaurant_count_country",0) + 1
+                                        if self.restaurant_details['countries'][country_name]["sampled_restaurant_count_country"] >= NUM_RESTAURANTS_PER_COUNTRY:
+                                            break
+
+                                        print(f"[FOUND] CNT:{city_detail['sampled_restaurant_count_city']}/{remaining_restaurant_count_city+sampled_restaurant_count_city} - {country_name} - {self.restaurant_details['countries'][country_name]['sampled_restaurant_count_country']}/400 --- {city_name} --- {restaurant_name}")
+                                    else:
+                                        continue
+
+                                    city_restaurant_cnt+=1
+                                    if city_restaurant_cnt>=remaining_restaurant_count_city:
+                                        break
+                                    
+                                except Exception as e:
+                                    print("EXCEPTION OCCURED: ",e)
+
+                            new_item_count = len(items)
+
+                            if city_restaurant_cnt>=remaining_restaurant_count_city:
+                                new_item_count = 0
+                            
+                            city_detail["last_item_count"] = new_item_count
+                            
+                            self.save_progress(self.restaurant_details_file,self.restaurant_details)
+                            
+                            print(f"Processed {new_item_count - last_item_count} new items.\tCity: {city_name}, CNT: {city_restaurant_cnt}/{remaining_restaurant_count_city}")
+                            last_item_count = new_item_count
+
+                            if city_restaurant_cnt >= remaining_restaurant_count_city:
+                                break
+
+                            if self.restaurant_details['countries'][country_name]["sampled_restaurant_count_country"] >= NUM_RESTAURANTS_PER_COUNTRY:
+                                break
+
+                            # CHECK IF WE'VE REACHED THE BOTTOM
+                            if driver.execute_script("return document.documentElement.scrollHeight - document.documentElement.scrollTop <= document.documentElement.clientHeight + 1;"):
+                                break
+                            
+                        except TimeoutException:
+                            print("No new items loaded, probably reached the end: URL" , url)
+                            break
+
+                    print(
+                        f"Finished processing all items. Total extracted: {city_restaurant_cnt}/{remaining_restaurant_count_city}"
+                    )
+
+
+                finally:
+                    driver.quit()
+
+    def scrape_city_names_from_countries(self,countries):
+        """Searches in restaurantguru.com for city names. Only gets the city if it has more than {CITY_RESTAURANT_CNT_THRESHHOLD} number of restaurants (200) listed on the website.
+        """
+
+        self.restaurant_details = self.load_progress(self.restaurant_details_file)
+
+        self.restaurant_details['countries'] = {}
+
+        for country_name in countries:
+            country_dict={}
+
             country_search = country_name.replace(" ", "-")
 
-            """SELENIUM IS THE WAY"""
-
-
-            url = f"https://t.restaurantguru.com/restaurant-{country_search}-t1/"
+            url = f"https://t.restaurantguru.com/cities-{country_search}-c/"
 
             chrome_options = webdriver.ChromeOptions()
             chrome_options.add_argument("--headless")  # Run in headless mode (optional)
@@ -98,163 +262,42 @@ class GoogleSpider(scrapy.Spider):
                 service=Service(ChromeDriverManager().install()), options=chrome_options
             )
 
-            self.restaurant_details = self.load_progress(self.restaurant_details_file)
-            load_last_item_count = self.restaurant_details.get("last_item_count",0) # DEFAULT START VALUE SHOULD BE 0 BUT 100 IS CHOSEN FOR KICKSTARTING
-            self.restaurant_details.pop("last_item_count",None)
-
-            cities = {}
-
-            cnt = 0
-            for item in self.restaurant_details.values():
-                if item["country_name"] == country_name:
-                    cnt += 1
-                    cities[item["city_name"]] = cities.get(item["city_name"],0)+1
-            if cnt==50:
-                continue
-            
 
             try:
                 driver.get(url)
 
-                last_item_count = 0
+                city_elements = driver.find_elements(By.CSS_SELECTOR, "ul.cities_link li")
+                
+                cities_dict = {}
 
-                while True:
-                    
-                    driver.execute_script("window.scrollTo(0,document.body.scrollHeight);")
-
+                country_restaurant_count = 0
+                for city_element in city_elements:
                     try:
-                        # Wait for new items to load
-                        WebDriverWait(driver, 5).until(
-                            lambda d: len(
-                                d.find_elements(
-                                    By.CSS_SELECTOR,
-                                    "div.wrapper_info",
-                                )
-                            )
-                            > last_item_count
-                        )
+                        city_link = city_element.find_element(By.CSS_SELECTOR,"a").get_attribute('href')
+                        city_name = city_element.find_element(By.CSS_SELECTOR,"a").text.split("/")[0].strip()
+                        city_restaurant_cnt = int(city_element.find_element(By.CSS_SELECTOR,"span.grey").text.split()[-1])
 
-                        # Get all items
-                        items = driver.find_elements(
-                            By.CSS_SELECTOR, "div.wrapper_info"
-                        )
-                        # Process only the new items
-                        if len(items)<load_last_item_count:
-                            last_item_count = len(items)
-                            print("Previously checked items, please wait ",last_item_count)
+                        if city_restaurant_cnt<CITY_RESTAURANT_CNT_THRESHHOLD:
                             continue
                         
-                        for item in items[last_item_count:]:
-                            try:
+                        cities_dict[city_name]={'url':city_link,'city_restaurant_count':city_restaurant_cnt}
+                        country_restaurant_count += city_restaurant_cnt
 
-                                if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
-                                    break
+                        print(f"FOUND {len(cities_dict.keys())}: ",cities_dict[city_name])
+                    except Exception as e:
+                        print(f"Exception found: {e}")
 
-                                name_element = item.find_element(
-                                    By.CSS_SELECTOR, "a.notranslate.title_url"
-                                )
-                                restaurant_name = name_element.text
-                                restaurant_url = name_element.get_attribute('href')
-                                
-                                city_name = ""
-                                try:
-                                    city_string = item.find_element(
-                                        By.CSS_SELECTOR, "div.number"
-                                    ).text
-                                    marker = "to eat in "
-                                    start_index = city_string.find(marker)
-                                    city_name = city_string[start_index + len(marker):].strip()
-
-                                    
-                                    closed_or_not = item.find_element(
-                                        By.CSS_SELECTOR, "div.closed_info_block"
-                                    )
-                                    if closed_or_not:
-                                        closed_or_not = closed_or_not.text
-                                        if "permanently closed" in closed_or_not.lower():
-                                            continue
-                                except Exception as e:
-                                    pass
-                                
-
-                                if city_name:
-                                    if len(cities.keys())>=MAX_NUM_CITIES_PER_COUNTRY and city_name not in cities.keys():
-                                        continue
-
-                                    if cities.get(city_name,0) >= MAX_NUM_RESTAURANTS_PER_CITY:
-                                        continue
-                                    
-                                    fid,gps_coordinate,city_name,search_url = self.get_review_page_fid_gps_from_name(restaurant_name,city_name=city_name,country_name=country_name)
-
-                                    if not fid or not gps_coordinate or not city_name:
-                                        continue
-                                else:
-                                    fid,gps_coordinate,city_name,search_url = self.get_review_page_fid_gps_from_name(restaurant_name,city_name=city_name,country_name=country_name)
-                                    
-                                    if not fid or not gps_coordinate or not city_name:
-                                        continue
-
-                                    if len(cities.keys())>=MAX_NUM_CITIES_PER_COUNTRY and city_name not in cities.keys():
-                                        continue
-
-                                    if cities.get(city_name,0) >= MAX_NUM_RESTAURANTS_PER_CITY:
-                                        continue
-
-
-                                
-
-                                if not self.restaurant_details.get(fid,None):
-                                    self.restaurant_details[fid] = {"restaurant_name":restaurant_name,"city_name":city_name,"country_name":country_name,"url":search_url,"gps_coordinates":gps_coordinate}
-                                    cities[city_name] = cities.get(city_name,0) + 1
-                                    print(f"[FOUND] CNT:{cnt+1} - {country_name} --- {city_name} --- {restaurant_name}")
-                                else:
-                                    continue
-
-                                cnt+=1
-                                if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
-
-                                    break
-                        
-                            except Exception as e:
-                                print("EXCEPTION OCCURED: ",e)
-                        
-                        
-                        
-
-                        new_item_count = len(items)
-                        
-                        self.restaurant_details["last_item_count"] = new_item_count
-                        if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
-                            self.restaurant_details.pop("last_item_count",None)
-                        self.save_progress(self.restaurant_details_file,self.restaurant_details)
-                        # Update the count
-                        
-                        print(f"Processed {new_item_count - last_item_count} new items.\tCity dict: {cities}, CNT: {cnt}")
-                        last_item_count = new_item_count
-
-
-                        if cnt>=NUM_RESTAURANTS_PER_COUNTRY:
-                            self.restaurant_details.pop("last_item_count",None)
-                            break
-
-                        # Check if we've reached the bottom
-                        if driver.execute_script("return document.documentElement.scrollHeight - document.documentElement.scrollTop <= document.documentElement.clientHeight + 1;"):
-                            break
-                        
-
-                        
-                    except TimeoutException:
-                        print("No new items loaded, probably reached the end: URL" , url)
-                        break
-
-                print(
-                    f"Finished processing all items. Total extracted: {cnt}"
-                )
-                self.restaurant_details.pop("last_item_count",None)
-
+                country_dict['cities'] = cities_dict
+                country_dict['cities_count'] = len(cities_dict.keys())
+                country_dict['country_restaurant_count'] = country_restaurant_count
 
             finally:
                 driver.quit()
+            
+            self.restaurant_details['countries'][country_name] = country_dict
+
+            
+        self.save_progress(self.restaurant_details_file,self.restaurant_details)
 
     def get_review_page_fid_gps_from_name(self, restaurant_name, city_name="", country_name=""):
         """
@@ -269,19 +312,11 @@ class GoogleSpider(scrapy.Spider):
         ------
         fid, gps_coordinate, city_name, search_url : feature_id of the reviews page, gps_coordinate: a str of format "lat,lon", city_name: returns the name of the city to cross check, search_url: the search url that was successful in locating the google reviews box
         """
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        # address = address.split("Abu Dhabi - United Arab Emirates")[0]
-        # if city_name:
-        #     print("FID: CITY NAME")
 
         if city_name:
             search_texts = [f"{restaurant_name} {city_name} {country_name}",f"{restaurant_name} restaurant {city_name} {country_name}",f"{restaurant_name} {country_name}",f"{restaurant_name} restaurant {country_name}",f"{restaurant_name} {city_name}",f"{restaurant_name} {city_name} restaurant"]
         else:
             search_texts = [f"{restaurant_name} {city_name} {country_name}",f"{restaurant_name} restaurant {city_name} {country_name}",f"{restaurant_name} {country_name}",f"{restaurant_name} restaurant {country_name}"]
-
-        # search_text = search_text.replace(" ", "+")
 
         for search_text in search_texts:
             search_text = quote_plus(search_text)
@@ -291,7 +326,7 @@ class GoogleSpider(scrapy.Spider):
 
             # SOMETIMES THE RATE OF REQUESTS EXCEED THE LIMIT. WAITING IS BETTER IN THAT SCENARIO
             if response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', 60))
+                retry_after = int(response.headers.get('Retry-After', 200))
                 print(f"Rate limit exceeded. Waiting for {retry_after} seconds")
                 time.sleep(retry_after)
             
@@ -384,32 +419,6 @@ class GoogleSpider(scrapy.Spider):
                 writer.writeheader()
             writer.writerow(row)
 
-    def generate_unique_filename(self):
-        """Helper Method to generate unique filenames. Obsolete in this version of the code
-        Returns
-        ----
-        name: A 15-byte random hexadecimal string"""
-        # Generate a random 15-byte hexadecimal string
-        name = binascii.b2a_hex(os.urandom(15)).decode("utf-8")
-        # Ensure the filename is unique in the given directory
-        while os.path.exists(os.path.join("./images/", name)):
-            name = binascii.b2a_hex(os.urandom(15)).decode("utf-8")
-        return name
-
-    def convert_png_to_webp(self, input_path, output_path, quality=80):
-        """
-        Convert a PNG image to WebP format. Not employed in this version of the code
-        """
-        try:
-            # Open the PNG image
-            with Image.open(input_path) as img:
-                # Convert and save as WebP
-                img.save(output_path, "WEBP", quality=quality)
-            print(f"Converted {input_path} to {output_path}")
-            os.remove(input_path)
-        except Exception as e:
-            print(f"Error converting {input_path}: {str(e)}")
-
     def download_image(self, name, url):
         """Helper method to download images from a url
         """
@@ -420,16 +429,14 @@ class GoogleSpider(scrapy.Spider):
         with open(f"./images/{name}.png", "wb") as out_file:
             shutil.copyfileobj(response.raw, out_file)
 
-        # self.convert_png_to_webp(f"./images/{name}.png", f"./images/{name}.webp")
-
     def start_requests(self):
         """Default method called by scrapy. Use 'scrapy crawl google' command to start scraping. Loads the restaurant details form restaurant_details.json file and starts scraping for 
         reviews with images. Scraping is currently subject to constraints. At most NUM_IMAGES_PER_USER number of images (by default 3) are gathered and then it moves on to the next user. 
         Gathers NUM_IMGS_TO_DOWNLOAD number of images for each restaurant (by default 30)"""
     
 
-        for fid in self.restaurant_details:
-            restaurant_detail = self.restaurant_details[fid]
+        for fid in self.restaurant_details['restaurants']:
+            restaurant_detail = self.restaurant_details['restaurants'][fid]
 
             restaurant_name = restaurant_detail["restaurant_name"]
             if fid not in self.scraping_progress:
@@ -612,8 +619,6 @@ class GoogleSpider(scrapy.Spider):
                     "city_name":city_name,
                     "restaurant_name": restaurant_name,
                     "feature_id":feature_id,
-                    "lat": lat,
-                    "lon": lon,
                     "reviewer": reviewer,
                     "reviewer_id": reviewer_id,
                     "num_reviews": num_reviews,
@@ -621,6 +626,8 @@ class GoogleSpider(scrapy.Spider):
                     "review_rating": review_rating,
                     "review_date": review_date,
                     "image_name": image_name,
+                    "lat": lat,
+                    "lon": lon,
                 }
                 self.save_to_csv(self.scrape_data_file, data_row)
 
@@ -642,10 +649,8 @@ class GoogleSpider(scrapy.Spider):
             response.request.url.split(",next_page_token:")[0]
             + f",next_page_token:{next_page_token},_fmt:pc"
         )
-        # print("NEXT URL!\n\n\n", next_url, "NEXT URL!\n\n\n")
+        
 
-        ##########################
-        # LOG YOUR CURRENT PROGRESS SO THAT YOU CAN PICK UP FROM HERE LATER
         self.scraping_progress[feature_id]["next_page_token"] = next_page_token
         if next_page_token == "":
             self.scraping_progress[feature_id]["status"] = "completed"
@@ -673,8 +678,14 @@ class GoogleSpider(scrapy.Spider):
             )
 
 
-# # UNCOMMENT AND RUN THIS IN ORDER TO SCRAPE FOR RESTAURANT DETAILS FROM restaurantguru.com AND google reviews
 
-# spider = GoogleSpider()
+spider = GoogleSpider()
 
-# spider.scrape_restaurant_names_from_country(COUNTRIES)
+'''Method to get city names from restaurantguru.com from country name'''
+# spider.scrape_city_names_from_countries(COUNTRIES) # WARNING: THIS MIGHT TRIGGER CPATCHAS
+
+'''Method to get restaurant names from the city names we collected previously'''
+spider.scrape_restaurant_names_from_countries(COUNTRIES)
+
+'''Scrapy calls start_requests on it's own when "scrapy crawl google" command is passed'''
+'''But if you only want to get the restaurant names or city names, use "python google.py" and it should be enough'''
