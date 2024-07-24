@@ -1,6 +1,6 @@
 # GeoLocation for Indoor Images 
 
-In this project, we aimed to improve the image-to-location capabilities of machine learning models with regard to datasets consisting of indoor images. Other existing models perform well with regard to outdoor images but have subpar performance when it comes to indoor images. We focused on the results of the GEOCLIP model in particular. The exact results can be found [here](https://arxiv.org/abs/2103.00020).
+In this project, we aimed to improve the image-to-location capabilities of machine learning models with regard to geolocating indoor images. Current existing models perform well in case outdoor images but have subpar performance when it comes to indoor images. We focused on the results of the GeoCLIP model in particular, due to this model having SOTA results all the while being open-source. The original GeoCLIP results can be found [here](https://arxiv.org/abs/2103.00020).
 
 # Idea
 
