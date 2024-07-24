@@ -685,7 +685,7 @@ spider = GoogleSpider()
 # spider.scrape_city_names_from_countries(COUNTRIES) # WARNING: THIS MIGHT TRIGGER CPATCHAS
 
 '''Method to get restaurant names from the city names we collected previously'''
-spider.scrape_restaurant_names_from_countries(COUNTRIES)
+# spider.scrape_restaurant_names_from_countries(COUNTRIES)
 
 '''Scrapy calls start_requests on it's own when "scrapy crawl google" command is passed'''
 '''But if you only want to get the restaurant names or city names, use "python google.py" and it should be enough'''

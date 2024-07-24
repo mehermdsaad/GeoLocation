@@ -80,17 +80,19 @@ def process_csv(input_file, output_file, process_function):
         reader = csv.DictReader(infile)
         
         for i, row in enumerate(reader):
-            if i < last_processed_row:
-                continue  # Skip already processed rows
-            
-            # Process the row and get the result
+            # if i < last_processed_row:
+            #     continue  # Skip already processed rows
+
+                # Process the row and get the result
             result = process_function(row)
-            
+            if not result:
+                continue 
             # Append the result to the output CSV
             append_row_to_csv(output_file, result)
 
-            print(f"Processed row {i + 1}")
-
+            # print(f"Processed row {i + 1}")
+            print(f"Processed row {i + 1}, {row} , result: {result}")
+            
 # Example usage:
 def process_function(row):
     global total_time
@@ -132,11 +134,21 @@ def process_function(row):
 
     return row
 
+def filter_errors(row):
+    if row['spherical_distance']=="-1":
+        print(f"FOUND {row}")
+        return None
+    else:
+        return row
+    
 # Use the function
-input_file = 'reviews_48k.csv'
-output_file = 'reviews_48k_processed.csv'
+# input_file = 'reviews_48k.csv'
+# output_file = 'reviews_48k_processed.csv'
+input_file = 'reviews_48k_processed.csv'
+output_file = 'reviews_48k_processed_filtered.csv'
 
 total_time = 0
-process_csv(input_file, output_file, process_function)
+# process_csv(input_file, output_file, process_function)
+process_csv(input_file, output_file, filter_errors)
 
 
