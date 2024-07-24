@@ -3,3 +3,5 @@ review_scraper/spiders/__pycache__
 review_scraper/spiders/images
 review_scraper/spiders/backup
 geoclip_eval/images
+geoclip_eval/evalenv
+image_clustering/clusterenv
