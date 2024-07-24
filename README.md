@@ -31,7 +31,6 @@ The total number of restaurants per country is set before running the script. Th
 Contains script to evaluate images based on pre-trained geoclip model. <code>./eval_geoclip/eval_geoclip.py</code> takes an input csv file, locates the image using image_path value, and then processes it using the pretrained geoclip model. The predicted latitude and longitude are then appended to an output file, along with the spherical distance from the original latitude and longitude of the image. Our aim is to later label the image categories and measure the performance of GeoCLIP on different image classes.  
 <br><br>
 <b>NOTE:</b> The script can be interrupted and once run again it will pick up from where it left off. The User might need to fix the image_path for different cases.
-<br><br>
 
 <h2>image_clustering</h2>
 Contains a notebook that runs a basic clustering algorithm to try to distinguish between food vs non-food images. Might be helpful in the future for image labeling. 
